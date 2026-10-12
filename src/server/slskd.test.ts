@@ -66,6 +66,42 @@ describe("slskd 0.26.1 REST adapter", () => {
     expect(fetcher.mock.calls[1]?.[0]).toBe("http://slskd:5030/api/v0/users/alice/browse");
   });
 
+  it("expands basename-only folder responses without crossing into sibling directories", async () => {
+    const fetcher = vi.fn(async () => json([
+      { name: "Music/Album", files: [
+        { filename: "01 Track.flac", size: 500 },
+        { filename: "02 Track.mp3", size: 250 },
+        { filename: "../Sibling/03 Track.flac", size: 100 }] },
+      { name: "Music/Sibling", files: [{ filename: "04 Sibling.flac", size: 100 }] },
+      { name: "Music/Album/Disc 2", files: [{ filename: "05 Nested.flac", size: 150 }] }
+    ]));
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+    expect((await adapter.browse("alice", "Music\\Album", false)).map(f => f.path))
+      .toEqual(["Music/Album/01 Track.flac", "Music/Album/02 Track.mp3"]);
+    expect((await adapter.browse("alice", "Music\\Album", true)).map(f => f.path))
+      .toEqual(["Music/Album/01 Track.flac", "Music/Album/02 Track.mp3", "Music/Album/Disc 2/05 Nested.flac"]);
+  });
+
+  it("falls back to a bounded full-share browse when a peer returns an empty targeted folder", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/directory") ?
+      json([{ name: "Music\\Album", files: [] }]) :
+      json([{ name: "Music\\Album", files: [{ filename: "Song.flac", size: 100 }] },
+        { name: "Music\\Sibling", files: [{ filename: "Other.flac", size: 200 }] }]));
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+    expect((await adapter.browse("alice", "Music\\Album", false)).map(file => file.path))
+      .toEqual(["Music\\Album\\Song.flac"]);
+    expect(fetcher.mock.calls.map(call => String(call[0]))).toEqual([
+      "http://slskd:5030/api/v0/users/alice/directory",
+      "http://slskd:5030/api/v0/users/alice/browse"
+    ]);
+  });
+
+  it("reports a directory response with files that do not match the selected folder", async () => {
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10,
+      vi.fn(async () => json([{ name: "Music/Sibling", files: [{ filename: "song.flac", size: 100 }] }])));
+    await expect(adapter.browse("alice", "Music/Album", false)).rejects.toThrow("none had paths within the selected folder");
+  });
+
   it("does not accept contradictory raw and flattened audio metadata", async () => {
     const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10,
       vi.fn(async () => json([{ name: "Album", files: [{

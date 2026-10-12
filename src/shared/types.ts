@@ -88,6 +88,7 @@ export interface FolderPreview {
   created_at: string;
   eligible_count: number;
   excluded_count: number;
+  audio_bytes: number;
   eligible_bytes: number;
 }
 
@@ -101,6 +102,8 @@ export interface FolderJob {
   discovered_count: number;
   eligible_count: number;
   excluded_count: number;
+  selected_count: number;
+  unselected_count: number;
   estimated_bytes: number;
   status: string;
   error: string | null;

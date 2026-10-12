@@ -44,6 +44,8 @@ describe("request parsing and matching", () => {
     expect(withinDirectory("peer\\Album\\one.flac", "peer\\Album", false)).toBe(true);
     expect(withinDirectory("peer\\Album\\Disc 2\\two.flac", "peer\\Album", false)).toBe(false);
     expect(withinDirectory("peer\\Album\\Disc 2\\two.flac", "peer\\Album", true)).toBe(true);
+    expect(withinDirectory("peer/Album/Disc 2/two.flac", "peer\\Album", true)).toBe(true);
+    expect(withinDirectory("peer/Album/two.flac", "peer\\Album", false)).toBe(true);
     expect(withinDirectory("peer\\Album 2\\two.flac", "peer\\Album", true)).toBe(false);
     expect(withinDirectory("peer\\Album\\..\\Sibling\\two.flac", "peer\\Album", true)).toBe(false);
     expect(withinDirectory("peer\\Album\\Disc 2\\..\\two.flac", "peer\\Album", true)).toBe(false);

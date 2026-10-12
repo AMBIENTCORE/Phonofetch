@@ -132,20 +132,38 @@ export class SlskdAdapter implements SlskdPort {
 
   async browse(username: string, selectedDirectory: string, recursive: boolean): Promise<RemoteFile[]> {
     const endpoint = `/api/v0/users/${encodeURIComponent(username)}`;
-    const directories = recursive ?
-      await this.call("GET", `${endpoint}/browse`, z.array(directory)) :
-      await this.call("POST", `${endpoint}/directory`, z.array(directory), { directory: selectedDirectory });
-    const files: RemoteFile[] = [];
-    for (const item of directories) {
-      if (!recursive && item.name !== selectedDirectory) continue;
-      for (const file of item.files) {
-        const fullPath = file.filename;
-        if (!withinDirectory(fullPath, selectedDirectory, recursive)) continue;
-        files.push({ username, path: fullPath, directory: parentDirectory(fullPath),
-          size: file.size, metadata: this.meta(file) });
+    const normalizeDirectory = (path: string): string => path.replace(/\\/g, "/").replace(/\/+$/, "");
+    const collect = (directories: z.infer<typeof directory>[]): { files: RemoteFile[]; returnedFiles: number } => {
+      const files: RemoteFile[] = [];
+      let returnedFiles = 0;
+      for (const item of directories) {
+        for (const file of item.files) {
+          returnedFiles++;
+          const sameDirectory = normalizeDirectory(item.name) === normalizeDirectory(selectedDirectory);
+          const separator = item.name.includes("\\") ? "\\" : "/";
+          const fullPath = withinDirectory(file.filename, selectedDirectory, recursive) ? file.filename :
+            (sameDirectory || recursive) && !/[\\/]/.test(file.filename) ?
+              `${item.name.replace(/[\\/]$/, "")}${separator}${file.filename}` : "";
+          if (!withinDirectory(fullPath, selectedDirectory, recursive)) continue;
+          files.push({ username, path: fullPath, directory: parentDirectory(fullPath),
+            size: file.size, metadata: this.meta(file) });
+        }
       }
+      return { files, returnedFiles };
+    };
+    if (recursive) {
+      const result = collect(await this.call("GET", `${endpoint}/browse`, z.array(directory)));
+      if (result.returnedFiles && !result.files.length)
+        throw new Error(`slskd returned ${result.returnedFiles} remote files, but none had paths within the selected folder`);
+      return result.files;
     }
-    return files;
+    const direct = collect(await this.call("POST", `${endpoint}/directory`, z.array(directory), { directory: selectedDirectory }));
+    if (direct.files.length) return direct.files;
+    const fullShare = collect(await this.call("GET", `${endpoint}/browse`, z.array(directory)));
+    if (fullShare.files.length) return fullShare.files;
+    if (direct.returnedFiles || fullShare.returnedFiles)
+      throw new Error(`slskd returned ${direct.returnedFiles} files from the selected directory and ${fullShare.returnedFiles} from the share, but none had paths within the selected folder`);
+    return [];
   }
 
   async enqueue(username: string, file: RemoteFile, batchId: string): Promise<string | null> {

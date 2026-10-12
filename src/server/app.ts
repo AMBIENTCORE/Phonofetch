@@ -29,7 +29,7 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
   const app = express();
   app.disable("x-powered-by");
   if (config.TRUST_PROXY) app.set("trust proxy", 1);
-  app.use(express.json({ limit: "80kb", type: "application/json" }));
+  app.use(express.json({ limit: "512kb", type: "application/json" }));
   app.use((_, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
@@ -140,11 +140,13 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
   app.post("/api/requests/:id/queue-folder", async (req, res) => {
     const request = getRequest(req.params.id);
     if (request.status !== "review" && request.status !== "no_results") throw new ApiError(409, "Request is not awaiting review");
-    const { previewId } = z.object({ previewId: uuid }).parse(req.body);
-    const row = store.get<Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "eligible_bytes"> & { files: string; recursive: number }>(
+    const { previewId, selectedPaths } = z.object({
+      previewId: uuid, selectedPaths: z.array(z.string().min(1).max(1024)).max(config.MAX_FOLDER_FILES).optional()
+    }).parse(req.body);
+    const row = store.get<Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number }>(
       "SELECT * FROM folder_previews WHERE id=? AND request_id=?", previewId, request.id);
     if (!row) throw new ApiError(404, "Folder preview not found");
-    res.status(202).json({ id: await workflow.queueFolder(request, store.inflatePreview(row)) });
+    res.status(202).json({ id: await workflow.queueFolder(request, store.inflatePreview(row), selectedPaths) });
   });
   app.post("/api/requests/:id/retry", (req, res) => {
     const request = getRequest(req.params.id);
@@ -212,6 +214,10 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
     next();
   });
   const errors: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
+    if (typeof error === "object" && error !== null && "status" in error && error.status === 413) {
+      res.status(413).json({ error: "Request body exceeds the upload limit" });
+      return;
+    }
     if (error instanceof ZodError) {
       res.status(400).json({ error: `Invalid request: ${error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ")}` });
       return;

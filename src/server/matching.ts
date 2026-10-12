@@ -39,11 +39,11 @@ export function fileName(path: string): string {
 }
 
 export function withinDirectory(path: string, directory: string, recursive: boolean): boolean {
-  if (!directory || !path.startsWith(directory)) return false;
-  if (directory.split(/[\\/]/).some(part => part === "." || part === "..")) return false;
-  const relative = path.slice(directory.length);
-  if (!/^[\\/]/.test(relative)) return false;
-  const name = relative.slice(1);
+  const selected = directory.replace(/\\/g, "/").replace(/\/+$/, "");
+  const filename = path.replace(/\\/g, "/");
+  if (!selected || selected.split("/").some(part => part === "." || part === "..") ||
+    !filename.startsWith(`${selected}/`)) return false;
+  const name = filename.slice(selected.length + 1);
   return Boolean(name) && !name.split(/[\\/]/).some(part => !part || part === "." || part === "..") &&
     (recursive || !/[\\/]/.test(name));
 }

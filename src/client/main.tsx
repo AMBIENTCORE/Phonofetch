@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { Activity, AudioMetadata, Batch, BatchDetail, FolderPreview, Quality, RequestType, SeedKind, SlskdConnectionState, TransferItem } from "../shared/types";
+import type { Activity, AudioMetadata, Batch, BatchDetail, FolderPreview, PreviewFile, Quality, RequestType, SeedKind, SlskdConnectionState, TransferItem } from "../shared/types";
 import { normalize, parseLines, type ParsedLine } from "../server/matching";
+import { AUTO_FOLDER_PREVIEW_LIMIT, autoFolderPreviews, folderKey } from "./folder-results";
 import "./compact.css";
 
 let csrf = "";
@@ -166,7 +167,41 @@ function NewBatch({ action, busy }: { action: (fn: () => Promise<unknown>) => Pr
 function BatchPage({ id, page, reload, action, busy }: { id: string; page: string; reload: number; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
   const [data, setData] = useState<BatchDetail>();
   const [error, setError] = useState("");
+  const [previewErrors, setPreviewErrors] = useState<Record<string, string>>({});
+  const [inspecting, setInspecting] = useState<Set<string>>(new Set());
+  const attempted = useRef(new Set<string>());
+  const prefetching = useRef<string | null>(null);
   useEffect(() => { api<BatchDetail>(`/batches/${encodeURIComponent(id)}`).then(setData).catch(err => setError(String(err))); }, [id, reload]);
+  useEffect(() => { attempted.current.clear(); setPreviewErrors({}); setInspecting(new Set()); }, [id]);
+  const candidateSignature = data?.batch.id === id ? data.requests.map(request =>
+    `${request.id}:${request.status}:${request.candidates.map(candidate => candidate.id).join(",")}`).join("|") : "";
+  useEffect(() => {
+    if (!data || data.batch.id !== id || prefetching.current === id) return;
+    const next = autoFolderPreviews(data.requests, attempted.current);
+    if (!next.length) return;
+    prefetching.current = id;
+    let active = true;
+    void (async () => {
+      for (const { key, requestId, candidateId } of next) {
+        if (!active) break;
+        attempted.current.add(key);
+        setInspecting(current => new Set(current).add(key));
+        try {
+          const preview = await send<FolderPreview>(`/requests/${requestId}/preview`,
+            { candidateId, recursive: false });
+          if (active) setData(current => current?.batch.id === id ? { ...current, requests: current.requests.map(request =>
+            request.id === requestId ? { ...request, previews: [preview, ...request.previews] } : request) } : current);
+        } catch (cause) {
+          if (active) setPreviewErrors(current => ({ ...current, [key]: cause instanceof Error ? cause.message : String(cause) }));
+        } finally {
+          setInspecting(current => {
+            const remaining = new Set(current); remaining.delete(key); return remaining;
+          });
+        }
+      }
+    })().finally(() => { if (prefetching.current === id) prefetching.current = null; });
+    return () => { active = false; };
+  }, [id, candidateSignature]);
   useEffect(() => {
     const related = new URLSearchParams(location.hash.split("?")[1] ?? "").get("request");
     if (related && data?.requests.some(item => item.id === related))
@@ -177,17 +212,51 @@ function BatchPage({ id, page, reload, action, busy }: { id: string; page: strin
     {data?.slskd_status === "unavailable" && <p role="status" className="service-warning">slskd unavailable. These requests cannot search until it reconnects. <a href="#/activity">View Activity Log</a></p>}
     {data && <div className="batch-counts">{Object.entries(data.batch.counts ?? {}).map(([status, count]) =>
       <span key={status}>{status.replace("_", " ")}: <strong>{count}</strong></span>)}</div>}
-    <p role="alert">{error}</p>{data?.requests.map(request => <RequestCard key={request.id} request={request} action={action} busy={busy} />)}
+    <p role="alert">{error}</p>{data?.requests.map(request => <RequestCard key={request.id} request={request} action={action}
+      busy={busy} inspecting={inspecting} previewErrors={previewErrors} clearPreviewError={key => setPreviewErrors(current => {
+        const next = { ...current }; delete next[key]; return next;
+      })} />)}
     {data && <section className="panel"><div className="panel-heading"><h2>Recent activity</h2><a href="#/activity">Full log →</a></div><ActivityList events={data.activity} /></section>}</>;
 }
 
 type RequestDetail = BatchDetail["requests"][number];
-function RequestCard({ request, action, busy }: { request: RequestDetail; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
+function RequestCard({ request, action, busy, inspecting, previewErrors, clearPreviewError }: {
+  request: RequestDetail; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
+  inspecting: ReadonlySet<string>; previewErrors: Record<string, string>; clearPreviewError: (key: string) => void;
+}): React.ReactElement {
   const [recursive, setRecursive] = useState(false);
   const [retryQuality, setRetryQuality] = useState<Quality>(request.quality);
-  const [selectedPreview, setSelectedPreview] = useState<string | null>(null);
-  const preview = request.previews.find(item => item.id === selectedPreview) ?? request.previews[0];
-  const folderCandidates = Array.from(new Map(request.candidates.map(candidate => [`${candidate.username}\0${candidate.directory}`, candidate])).values());
+  const [trackMenu, setTrackMenu] = useState<{ candidateId: string; x: number; y: number } | null>(null);
+  const grouped = new Map<string, typeof request.candidates>();
+  for (const candidate of request.candidates) {
+    const key = folderKey(request.id, candidate.username, candidate.directory, recursive);
+    const hits = grouped.get(key) ?? [];
+    hits.push(candidate);
+    grouped.set(key, hits);
+  }
+  const folderGroupsByPeer = new Map<string, Array<[string, typeof request.candidates]>>();
+  for (const entry of grouped) {
+    const username = entry[1][0]!.username;
+    const folders = folderGroupsByPeer.get(username) ?? [];
+    folders.push(entry);
+    folderGroupsByPeer.set(username, folders);
+  }
+  const eligibleCount = request.candidates.filter(candidate => candidate.eligible).length;
+  const canInspect = ["review", "no_results"].includes(request.status) && !request.jobs.length;
+  const trackGroups = new Map<string, Map<string, typeof request.candidates>>();
+  for (const candidate of request.candidates) {
+    let directories = trackGroups.get(candidate.username);
+    if (!directories) { directories = new Map(); trackGroups.set(candidate.username, directories); }
+    const files = directories.get(candidate.directory) ?? [];
+    files.push(candidate);
+    directories.set(candidate.directory, files);
+  }
+  const queueTrack = (candidateId: string) => {
+    const candidate = request.candidates.find(item => item.id === candidateId);
+    if (candidate?.eligible && request.status === "review" && !request.transfers.length && !busy &&
+      confirm(`Queue exactly this file?\n${candidate.path}`))
+      void action(() => send(`/requests/${request.id}/select`, { candidateId }));
+  };
   return <section className="panel request" id={`request-${request.id}`}><div className="panel-heading">
     <div><span className="tag">{request.type === "track" ? "TRACK" : "ALBUM / FOLDER"}</span> <span className={`status ${request.status}`}>{request.status.replace("_", " ")}</span>
       <h2>{request.query_text}</h2>
@@ -200,26 +269,77 @@ function RequestCard({ request, action, busy }: { request: RequestDetail; action
       <div className="retry"><label>Retry with quality <select value={retryQuality} onChange={event => setRetryQuality(event.target.value as Quality)}>
         <option value="mp3_320">MP3 320</option><option value="flac">FLAC</option><option value="any">Any quality</option></select></label>
         <button className="secondary" disabled={busy} onClick={() => void action(() => send(`/requests/${request.id}/retry`, { quality: retryQuality }))}>Search again</button></div>}
-    {request.type === "track" && request.candidates.length > 0 && <div><h3>Matching files</h3><div className="candidate-list">
-      {request.candidates.map(candidate => <div className="candidate" key={candidate.id}>
-        <span><strong>{basename(candidate.path)}</strong><small>{candidate.username} · {candidate.path}</small><small>{bytes(candidate.size)} · {audioDetails(candidate.metadata)} · relevance {Math.round(candidate.score * 100)}% · {candidate.explanation}</small>
-          <small className={candidate.eligible ? "ok" : "warn"}>{candidate.reason}</small></span>
-        {candidate.eligible && request.transfers.length === 0 && <button disabled={busy} onClick={() => { if (confirm(`Queue exactly this file?\n${candidate.path}`)) void action(() => send(`/requests/${request.id}/select`, { candidateId: candidate.id })); }}>Queue file</button>}</div>)}</div></div>}
-    {request.type === "album_folder" && folderCandidates.length > 0 && <div><h3>Candidate folders</h3>
-      {folderCandidates.map(candidate => <div className="candidate" key={candidate.id}>
-        <span><strong>{candidate.directory}</strong><small>{candidate.username} · seed: {basename(candidate.path)} · relevance {Math.round(candidate.score * 100)}%</small><small>{candidate.explanation}</small></span>
-        <button className="secondary" disabled={busy} onClick={() => void action(async () => {
-          const result = await send<FolderPreview>(`/requests/${request.id}/preview`, { candidateId: candidate.id, recursive });
-          setSelectedPreview(result.id);
-        })}>Inspect folder</button></div>)}
-      <label className="check"><input type="checkbox" checked={recursive} onChange={event => setRecursive(event.target.checked)} /> Include nested files (never sibling folders)</label>
+    {request.type === "track" && request.candidates.length > 0 && <div><h3>Matching files · {eligibleCount} qualify · {request.candidates.length - eligibleCount} excluded</h3>
+      <p className="hint">Only files meeting {qualityLabel(request.quality)} can be queued. Right-click an eligible row or use Queue file.</p>
+      <div className="search-results">{[...trackGroups].map(([username, directories]) =>
+        <details className="peer-group" open key={username}><summary>{username} · {[...directories.values()].reduce((count, files) => count + files.length, 0)} matches</summary>
+          {[...directories].map(([directory, files]) => <details className="directory-group" open key={directory}>
+            <summary>{directory || "Shared files"} · {files.length} search hits · {bytes(files.reduce((sum, file) => sum + file.size, 0))} known</summary>
+            <div className="search-table-wrap"><table className="search-table"><thead><tr>
+              <th>File</th><th>Size</th><th>Quality / eligibility</th><th>Match</th><th>Action</th>
+            </tr></thead><tbody>{files.map(candidate => <tr key={candidate.id}
+              tabIndex={candidate.eligible && request.status === "review" ? 0 : undefined}
+              onContextMenu={event => {
+                if (!candidate.eligible || request.status !== "review" || request.transfers.length || busy) return;
+                event.preventDefault();
+                setTrackMenu({ candidateId: candidate.id, x: event.clientX, y: event.clientY });
+              }}
+              onKeyDown={event => {
+                if (event.shiftKey && event.key === "F10" && candidate.eligible && request.status === "review" && !request.transfers.length && !busy) {
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setTrackMenu({ candidateId: candidate.id, x: rect.left + 12, y: rect.bottom });
+                }
+              }}>
+              <td title={candidate.path}><strong>{basename(candidate.path)}</strong></td>
+              <td className="file-size">{bytes(candidate.size)}</td>
+              <td>{audioDetails(candidate.metadata)}<small className={candidate.eligible ? "ok" : "warn"}>
+                {candidate.eligible ? "Eligible" : "Excluded"} · {candidate.reason}</small></td>
+              <td>{Math.round(candidate.score * 100)}%<small>{candidate.explanation}</small></td>
+              <td>{candidate.eligible && request.status === "review" && !request.transfers.length &&
+                <button disabled={busy} onClick={() => queueTrack(candidate.id)}>Queue file</button>}</td>
+            </tr>)}</tbody></table></div>
+          </details>)}
+        </details>)}</div>
+      {trackMenu && request.status === "review" && !request.transfers.length && !busy &&
+        <ContextMenu x={trackMenu.x} y={trackMenu.y} label="Download file"
+        onDownload={() => queueTrack(trackMenu.candidateId)} onClose={() => setTrackMenu(null)} />}
     </div>}
-    {request.type === "album_folder" && preview && !request.jobs.length && <Preview preview={preview} busy={busy}
-      action={action} confirmPreview={() => { if (confirm(`Queue ${preview.eligible_count} eligible files from ${preview.username}\\${preview.directory}?${preview.excluded_count ? ` ${preview.excluded_count} excluded: partial album.` : ""}`))
-        void action(() => send(`/requests/${request.id}/queue-folder`, { previewId: preview.id })); }} />}
+    {request.type === "album_folder" && grouped.size > 0 && <div><h3>Candidate folders · {grouped.size}</h3>
+      <p className="hint">The first {AUTO_FOLDER_PREVIEW_LIMIT} folders in this batch are inspected automatically. Other search hits are incomplete until inspected.</p>
+      <label className="check"><input type="checkbox" checked={recursive} onChange={event => setRecursive(event.target.checked)} /> Include nested files (never sibling folders)</label>
+      {[...folderGroupsByPeer].map(([username, folders]) => <details className="peer-group" open key={username}>
+        <summary>{username} · {folders.length} folders</summary>{folders.map(([key, hits]) => {
+        const candidate = hits[0]!;
+        const preview = request.previews.find(item =>
+          folderKey(request.id, item.username, item.directory, item.recursive) === key);
+        const hitBytes = hits.reduce((total, file) => total + file.size, 0);
+        return <div className="folder-candidate" key={key}><div className="candidate">
+          <span><strong>{candidate.directory}</strong><small>Relevance {Math.round(candidate.score * 100)}% · {candidate.explanation}</small></span>
+          {canInspect && <button className="secondary" disabled={busy || inspecting.has(key)} onClick={() => void action(async () => {
+            await send<FolderPreview>(`/requests/${request.id}/preview`, { candidateId: candidate.id, recursive });
+            clearPreviewError(key);
+          })}>{inspecting.has(key) ? "Inspecting…" : preview ? "Refresh folder" : "Inspect folder"}</button>}
+        </div>
+        {preview ? <Preview key={preview.id} preview={preview} busy={busy} canQueue={canInspect}
+          confirmPreview={paths => {
+            const count = paths?.length ?? preview.eligible_count;
+            if (confirm(`Queue ${count} files from ${preview.username}\\${preview.directory}?${preview.excluded_count || count < preview.eligible_count ?
+              ` Partial folder: ${preview.excluded_count} quality-excluded and ${preview.eligible_count - count} unselected.` : ""}`))
+              void action(() => send(`/requests/${request.id}/queue-folder`, { previewId: preview.id, selectedPaths: paths }));
+          }} /> :
+          <div className="folder-search-hits">
+            <small>Search hits only (not the full folder) · {hits.length} file{hits.length === 1 ? "" : "s"} · {bytes(hitBytes)} known</small>
+            {hits.map(file => <div className="folder-hit" key={file.id}><span>{basename(file.path)}</span><span>{bytes(file.size)}</span></div>)}
+          </div>}
+        {previewErrors[key] && !preview && <small role="alert" className="warn">Inspection failed: {previewErrors[key]}. Select Inspect folder to retry.</small>}
+        </div>;
+      })}</details>)}
+    </div>}
     {request.jobs.map(job => <div key={job.id} className="job"><h3>Folder job · {job.status}</h3>
-      <p>{job.username} · {job.directory}</p><p>{job.transfers.filter(t => t.status === "completed").length} completed / {job.eligible_count} eligible
-        {job.excluded_count > 0 && <span className="warn"> · Partial album: {job.excluded_count} excluded</span>}</p>
+      <p>{job.username} · {job.directory} · selected {bytes(job.estimated_bytes)}</p>
+      <p>{job.transfers.filter(t => t.status === "completed").length} completed / {job.selected_count} selected
+        {job.excluded_count + job.unselected_count > 0 && <span className="warn"> · Partial folder: {job.excluded_count} quality-excluded, {job.unselected_count} unselected</span>}</p>
       <progress max={Math.max(1, job.transfers.reduce((sum, t) => sum + t.size, 0))}
         value={job.transfers.reduce((sum, t) => sum + t.transferred, 0)} /></div>)}
     {request.transfers.length > 0 && <div><h3>Transfers</h3>{request.transfers.map(transfer =>
@@ -227,15 +347,125 @@ function RequestCard({ request, action, busy }: { request: RequestDetail; action
   </section>;
 }
 
-function Preview({ preview, action, busy, confirmPreview }: { preview: FolderPreview; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean; confirmPreview: () => void }): React.ReactElement {
-  return <div className="preview"><h3>Folder preview</h3><p><strong>Peer:</strong> {preview.username} · <strong>Directory:</strong> {preview.directory}</p>
-    <p>{preview.files.length} discovered · <span className="ok">{preview.eligible_count} eligible</span> ·
-      <span className="warn"> {preview.excluded_count} excluded</span> · {bytes(preview.eligible_bytes)} estimated</p>
-    {preview.excluded_count > 0 && <p className="warn">This will be a partial album. Excluded files will not be queued.</p>}
-    <div className="file-list">{preview.files.map(file => <div key={file.path} className="file-row"><span>{basename(file.path)}<small>{bytes(file.size)} · {audioDetails(file.metadata)}</small></span>
-      <span className={file.eligible ? "ok" : "warn"}>{file.reason}</span></div>)}</div>
-    <button disabled={busy || preview.eligible_count === 0} onClick={confirmPreview}>Confirm {preview.eligible_count} eligible files</button>
-    <span className="hint"> Preview expires after 10 minutes; contents are verified again before queueing.</span></div>;
+function ContextMenu({ x, y, label, onDownload, onClose }: {
+  x: number; y: number; label: string; onDownload: () => void; onClose: () => void;
+}): React.ReactElement {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) onClose();
+    };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [onClose]);
+  return <div ref={ref} className="context-menu" role="menu"
+    style={{ left: Math.max(8, Math.min(x, window.innerWidth - 190)), top: Math.max(8, Math.min(y, window.innerHeight - 60)) }}>
+    <button role="menuitem" onClick={event => { event.stopPropagation(); onDownload(); onClose(); }}>{label}</button>
+  </div>;
+}
+
+interface FolderTreeNode {
+  name: string;
+  directories: Map<string, FolderTreeNode>;
+  files: PreviewFile[];
+}
+
+function FolderTree({ preview, selected, onSelect, onFileMenu, canQueue }: {
+  preview: FolderPreview; selected: Set<string>; onSelect: (path: string) => void;
+  onFileMenu: (event: React.MouseEvent | React.KeyboardEvent, file: PreviewFile) => void; canQueue: boolean;
+}): React.ReactElement {
+  const root: FolderTreeNode = { name: preview.directory, directories: new Map(), files: [] };
+  const prefix = `${preview.directory.replace(/\\/g, "/").replace(/\/+$/, "")}/`;
+  for (const file of preview.files) {
+    const normalized = file.path.replace(/\\/g, "/");
+    const parts = normalized.startsWith(prefix) ? normalized.slice(prefix.length).split("/") : [basename(file.path)];
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      let child = node.directories.get(part);
+      if (!child) {
+        child = { name: part, directories: new Map(), files: [] };
+        node.directories.set(part, child);
+      }
+      node = child;
+    }
+    node.files.push(file);
+  }
+  function totals(node: FolderTreeNode): { count: number; size: number } {
+    return [...node.directories.values()].reduce((result, child) => {
+      const nested = totals(child);
+      return { count: result.count + nested.count, size: result.size + nested.size };
+    }, { count: node.files.length, size: node.files.reduce((sum, file) => sum + file.size, 0) });
+  }
+  function render(node: FolderTreeNode): React.ReactElement {
+    return <ul className="folder-tree">
+      {[...node.directories.values()].sort((a, b) => a.name.localeCompare(b.name)).map(child => {
+        const total = totals(child);
+        return <li key={child.name}><details open><summary>{child.name}/ <small>{total.count} file{total.count === 1 ? "" : "s"} · {bytes(total.size)}</small></summary>{render(child)}</details></li>;
+      })}
+      {node.files.map(file => <li className="folder-tree-file" key={file.path} tabIndex={canQueue && file.eligible ? 0 : undefined}
+        onContextMenu={event => onFileMenu(event, file)}
+        onKeyDown={event => { if (event.key === "F10" && event.shiftKey) onFileMenu(event, file); }}>
+        <label className="folder-tree-select"><input type="checkbox" checked={selected.has(file.path)}
+          aria-label={`Select ${basename(file.path)}`} disabled={!canQueue || !file.eligible}
+          onChange={() => onSelect(file.path)} />
+          <span><strong>{basename(file.path)}</strong><small>{audioDetails(file.metadata)} · {file.eligible ? "Eligible" : `Excluded: ${file.reason}`}</small></span>
+        </label><span className="folder-file-size">{bytes(file.size)}</span>
+      </li>)}
+    </ul>;
+  }
+  return <div className="folder-tree-scroll">{render(root)}</div>;
+}
+
+function Preview({ preview, busy, canQueue, confirmPreview }: {
+  preview: FolderPreview; busy: boolean; canQueue: boolean; confirmPreview: (paths?: string[]) => void;
+}): React.ReactElement {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const expired = Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
+  const canDownload = canQueue && !busy && !expired;
+  const eligible = preview.files.filter(file => file.eligible);
+  const selectedFiles = eligible.filter(file => selected.has(file.path));
+  const selectedBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
+  const chooseFile = (path: string) => setSelected(current => {
+    const next = new Set(current);
+    if (next.has(path)) next.delete(path); else next.add(path);
+    return next;
+  });
+  const openFileMenu = (event: React.MouseEvent | React.KeyboardEvent, file: PreviewFile) => {
+    if (!file.eligible || !canDownload) return;
+    event.preventDefault();
+    if (!selected.has(file.path)) setSelected(new Set([file.path]));
+    const rect = event.currentTarget.getBoundingClientRect();
+    setMenu({ x: "clientX" in event ? event.clientX : rect.left + 12,
+      y: "clientY" in event ? event.clientY : rect.bottom });
+  };
+  const selectedPaths = selectedFiles.map(file => file.path);
+  return <div className="preview folder-preview">
+    <div className="folder-summary"><span>Inspected · {preview.recursive ? "including nested files" : "immediate files"} ·
+      {preview.files.length} audio · {preview.eligible_count} eligible · {preview.excluded_count} excluded</span>
+      <strong>Audio total {bytes(preview.audio_bytes)} · Eligible {bytes(preview.eligible_bytes)}</strong></div>
+    <div className="folder-tree-columns"><span>File / quality</span><span>Size</span></div>
+    <FolderTree preview={preview} selected={selected} onSelect={chooseFile} onFileMenu={openFileMenu} canQueue={canDownload} />
+    {preview.excluded_count > 0 && <small className="warn">Partial album if downloaded: excluded files never queue.</small>}
+    {expired && <small className="warn">Preview expired. Refresh this folder before downloading.</small>}
+    {canQueue && <div className="folder-actions">
+      <button className="secondary" disabled={!canDownload} onClick={() => setSelected(new Set(eligible.map(file => file.path)))}>Select all eligible</button>
+      <button className="secondary" disabled={!canDownload || !selected.size} onClick={() => setSelected(new Set())}>Clear selection</button>
+      <button disabled={!canDownload || !selectedFiles.length} onClick={() => confirmPreview(selectedPaths)}>
+        Download selected ({selectedFiles.length}, {bytes(selectedBytes)})
+      </button>
+      <button className="secondary" disabled={!canDownload || !eligible.length} onClick={() => confirmPreview()}>
+        Download all eligible ({eligible.length})
+      </button>
+    </div>}
+    {menu && canDownload && <ContextMenu x={menu.x} y={menu.y} label={`Download selected (${selectedFiles.length})`}
+      onDownload={() => confirmPreview(selectedPaths)} onClose={() => setMenu(null)} />}
+  </div>;
 }
 
 function Transfer({ transfer, action, busy }: { transfer: TransferItem; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {

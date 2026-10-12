@@ -13,7 +13,7 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000");
     const version = this.db.prepare("PRAGMA user_version").get()?.user_version;
-    if (![0, 1, 2, 3, 4, 5].includes(Number(version))) throw new Error(`Unsupported database version: ${String(version)}`);
+    if (![0, 1, 2, 3, 4, 5, 6].includes(Number(version))) throw new Error(`Unsupported database version: ${String(version)}`);
     if (version === 0) {
       this.transaction(() => {
         this.db.exec(`
@@ -47,6 +47,7 @@ export class Store {
             id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES requests(id), preview_id TEXT NOT NULL REFERENCES folder_previews(id),
             username TEXT NOT NULL, directory TEXT NOT NULL, recursive INTEGER NOT NULL,
             discovered_count INTEGER NOT NULL, eligible_count INTEGER NOT NULL, excluded_count INTEGER NOT NULL,
+            selected_count INTEGER NOT NULL, unselected_count INTEGER NOT NULL,
             estimated_bytes INTEGER NOT NULL, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
           );
           CREATE TABLE transfers (
@@ -72,7 +73,7 @@ export class Store {
           CREATE TABLE worker_lock (
             id INTEGER PRIMARY KEY CHECK (id=1), owner TEXT NOT NULL, expires_at TEXT NOT NULL
           );
-          PRAGMA user_version=5;
+          PRAGMA user_version=6;
         `);
       });
     }
@@ -100,6 +101,12 @@ export class Store {
           ELSE TRIM(norm_artist || ' ' || norm_title) END;
         PRAGMA user_version=5;
       `);
+    });
+    if (version === 1 || version === 2 || version === 3 || version === 4 || version === 5) this.transaction(() => {
+      this.db.exec(`ALTER TABLE folder_jobs ADD COLUMN selected_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE folder_jobs ADD COLUMN unselected_count INTEGER NOT NULL DEFAULT 0;
+        UPDATE folder_jobs SET selected_count=eligible_count;
+        PRAGMA user_version=6;`);
     });
   }
 
@@ -174,8 +181,8 @@ export class Store {
         "SELECT * FROM candidates WHERE request_id=? ORDER BY score DESC LIMIT 200", request.id)
         .map(candidate => ({ ...candidate, metadata: JSON.parse(candidate.metadata) as Candidate["metadata"],
           eligible: Boolean(candidate.eligible), selected: Boolean(candidate.selected) }));
-      const previews = this.all<Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "eligible_bytes"> & { files: string; recursive: number }>(
-        "SELECT * FROM folder_previews WHERE request_id=? ORDER BY created_at DESC LIMIT 8", request.id)
+      const previews = this.all<Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number }>(
+        "SELECT * FROM folder_previews WHERE request_id=? ORDER BY created_at DESC LIMIT 20", request.id)
         .map(preview => this.inflatePreview(preview));
       const jobs = this.all<FolderJob>("SELECT * FROM folder_jobs WHERE request_id=? ORDER BY created_at DESC", request.id)
         .map(job => ({ ...job, transfers: this.all<TransferItem>("SELECT * FROM transfers WHERE folder_job_id=? ORDER BY path", job.id) }));
@@ -191,21 +198,23 @@ export class Store {
       requests, activity: this.activity({ batchId: id, limit: 15 }) };
   }
 
-  inflatePreview(row: Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "eligible_bytes"> & { files: string; recursive: number }): FolderPreview {
+  inflatePreview(row: Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number }): FolderPreview {
     const files = JSON.parse(row.files) as PreviewFile[];
     const eligible = files.filter(file => file.eligible);
     return { ...row, files, recursive: Boolean(row.recursive), eligible_count: eligible.length,
       excluded_count: files.length - eligible.length,
+      audio_bytes: files.reduce((sum, file) => sum + file.size, 0),
       eligible_bytes: eligible.reduce((sum, file) => sum + file.size, 0) };
   }
 
-  savePreview(preview: Omit<FolderPreview, "id" | "created_at" | "eligible_count" | "excluded_count" | "eligible_bytes">): FolderPreview {
+  savePreview(preview: Omit<FolderPreview, "id" | "created_at" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes">): FolderPreview {
     const id = randomUUID();
     const created_at = new Date().toISOString();
     this.run("INSERT INTO folder_previews(id,request_id,username,directory,recursive,files,created_at) VALUES(?,?,?,?,?,?,?)",
       id, preview.request_id, preview.username, preview.directory, Number(preview.recursive), JSON.stringify(preview.files), created_at);
     const eligible = preview.files.filter(file => file.eligible);
     return { ...preview, id, created_at, eligible_count: eligible.length, excluded_count: preview.files.length - eligible.length,
+      audio_bytes: preview.files.reduce((sum, file) => sum + file.size, 0),
       eligible_bytes: eligible.reduce((sum, file) => sum + file.size, 0) };
   }
 

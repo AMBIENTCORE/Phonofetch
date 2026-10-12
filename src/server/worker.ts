@@ -348,11 +348,12 @@ export class Worker {
     const ids = this.store.all<{ request_id: string }>("SELECT DISTINCT request_id FROM transfers");
     for (const { request_id } of ids) {
       const transfers = this.store.all<TransferItem>("SELECT * FROM transfers WHERE request_id=?", request_id);
-      const job = this.store.get<{ id: string; excluded_count: number }>("SELECT id,excluded_count FROM folder_jobs WHERE request_id=? ORDER BY created_at DESC LIMIT 1", request_id);
+      const job = this.store.get<{ id: string; excluded_count: number; unselected_count: number }>(
+        "SELECT id,excluded_count,unselected_count FROM folder_jobs WHERE request_id=? ORDER BY created_at DESC LIMIT 1", request_id);
       const terminal = transfers.every(t => ["completed", "failed", "cancelled", "uncertain"].includes(t.status));
       const allDone = transfers.every(t => t.status === "completed");
       const status = transfers.some(t => t.status === "uncertain") ? "uncertain" :
-        terminal ? allDone ? (job?.excluded_count ? "partial" : "completed") :
+        terminal ? allDone ? (job?.excluded_count || job?.unselected_count ? "partial" : "completed") :
           transfers.some(t => t.status === "completed") && job ? "partial" :
             transfers.every(t => t.status === "cancelled") ? "cancelled" : "failed" :
         transfers.every(t => t.status === "ready" || t.status === "queueing") ? "queueing" : "active";
@@ -361,7 +362,8 @@ export class Worker {
         this.store.run("UPDATE requests SET status=?,updated_at=? WHERE id=?", status, new Date().toISOString(), request_id);
         if (job) this.store.run("UPDATE folder_jobs SET status=?,updated_at=? WHERE id=?", status, new Date().toISOString(), job.id);
         this.store.event(status === "completed" ? "success" : ["partial", "failed", "uncertain"].includes(status) ? "warning" : "info",
-          "request", "status_changed", `Request ${status}${job?.excluded_count ? `; ${job.excluded_count} files excluded (partial album)` : ""}`,
+          "request", "status_changed", `Request ${status}${job?.excluded_count || job?.unselected_count ?
+            `; ${job.excluded_count} quality-excluded, ${job.unselected_count} unselected (partial folder)` : ""}`,
           { batchId: current.batch_id, requestId: request_id, folderJobId: job?.id });
       }
     }

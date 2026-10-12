@@ -21,6 +21,8 @@ export class Workflow {
       const audio = bounded.filter(file => /\.(mp3|flac|m4a|ogg|opus|wav|aac)$/i.test(file.path));
       if (!audio.length) throw new ApiError(422, "No supported audio files in this folder");
       const files: PreviewFile[] = audio.map(file => ({ ...file, ...qualityCheck(file, request.quality) })).sort((a, b) => a.path.localeCompare(b.path));
+      if (!Number.isSafeInteger(files.reduce((total, file) => total + file.size, 0)))
+        throw new ApiError(413, "Folder size exceeds a reliable byte count");
       const eligibleBytes = files.reduce((total, file) => total + (file.eligible ? file.size : 0), 0);
       if (eligibleBytes > this.config.MAX_FOLDER_BYTES) throw new ApiError(413, "Eligible files exceed configured size limit");
       const preview = this.store.savePreview({ request_id: request.id, username: candidate.username,
@@ -28,7 +30,8 @@ export class Workflow {
       this.store.event("success", "folder", "browse_completed",
         `Folder inspected: ${files.length} audio files, ${preview.eligible_count} eligible, ${preview.excluded_count} excluded`,
         { batchId: request.batch_id, requestId: request.id },
-        { directory: candidate.directory, eligibleBytes, ignoredNonAudio: bounded.length - audio.length });
+        { directory: candidate.directory, audioBytes: preview.audio_bytes, eligibleBytes,
+          ignoredNonAudio: bounded.length - audio.length });
       for (const file of files.filter(item => !item.eligible))
         this.store.event("info", "quality", "folder_file_excluded", `${file.path}: ${file.reason}`,
           { batchId: request.batch_id, requestId: request.id });
@@ -40,10 +43,21 @@ export class Workflow {
     }
   }
 
-  async queueFolder(request: MusicRequest, preview: FolderPreview): Promise<string> {
+  async queueFolder(request: MusicRequest, preview: FolderPreview, selectedPaths?: string[]): Promise<string> {
     if (preview.request_id !== request.id || request.type !== "album_folder") throw new ApiError(400, "Invalid folder preview");
     if (Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000) throw new ApiError(409, "Folder preview expired; inspect again");
-    if (!preview.eligible_count) throw new ApiError(422, "No files meet strict quality criteria");
+    const eligible = preview.files.filter(file => file.eligible && qualityCheck(file, request.quality).eligible);
+    if (!eligible.length) throw new ApiError(422, "No files meet strict quality criteria");
+    if (selectedPaths && new Set(selectedPaths).size !== selectedPaths.length)
+      throw new ApiError(400, "Duplicate file selection");
+    const included = new Set(selectedPaths ?? eligible.map(file => file.path));
+    if (!included.size) throw new ApiError(422, "Select at least one eligible file");
+    if (included.size > this.config.MAX_FOLDER_FILES ||
+      [...included].some(path => !eligible.some(file => file.path === path)))
+      throw new ApiError(422, "Selection contains files outside this folder or failing strict quality");
+    const selected = eligible.filter(file => included.has(file.path));
+    const selectedBytes = selected.reduce((sum, file) => sum + file.size, 0);
+    if (selectedBytes > this.config.MAX_FOLDER_BYTES) throw new ApiError(413, "Selected files exceed configured size limit");
     const seed = this.store.get<{ score: number }>(
       "SELECT MAX(score) AS score FROM candidates WHERE request_id=? AND username=? AND directory=?",
       request.id, preview.username, preview.directory);
@@ -61,15 +75,17 @@ export class Workflow {
       const active = this.store.get<{ id: string }>("SELECT id FROM transfers WHERE request_id=? LIMIT 1", request.id);
       if (active) throw new ApiError(409, "This request already has transfers; no duplicate enqueue");
       const date = new Date().toISOString();
-      this.store.run(`INSERT INTO folder_jobs(id,request_id,preview_id,username,directory,recursive,discovered_count,eligible_count,excluded_count,estimated_bytes,status,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, request.id, preview.id, preview.username, preview.directory,
+      this.store.run(`INSERT INTO folder_jobs(id,request_id,preview_id,username,directory,recursive,discovered_count,eligible_count,excluded_count,selected_count,unselected_count,estimated_bytes,status,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, request.id, preview.id, preview.username, preview.directory,
       Number(preview.recursive), preview.files.length, preview.eligible_count, preview.excluded_count,
-      preview.eligible_bytes, "queueing", date, date);
-      for (const file of preview.files.filter(item => item.eligible)) this.insertTransfer(request, id, file);
+      selected.length, eligible.length - selected.length, selectedBytes, "queueing", date, date);
+      for (const file of selected) this.insertTransfer(request, id, file);
       this.store.run("UPDATE requests SET status='queueing',selected_directory=?,score=?,explanation=?,updated_at=? WHERE id=?",
         preview.directory, evidence.score, evidence.explanation, date, request.id);
-      this.store.event("success", "folder", "confirmed", `${preview.eligible_count} eligible files prepared for queueing${preview.excluded_count ? `; ${preview.excluded_count} excluded (partial album)` : ""}`,
-        { batchId: request.batch_id, requestId: request.id, folderJobId: id }, { directory: preview.directory, username: preview.username, evidence });
+      this.store.event("success", "folder", "confirmed",
+        `${selected.length} of ${eligible.length} eligible files selected (${preview.excluded_count} quality-excluded, ${eligible.length - selected.length} unselected)`,
+        { batchId: request.batch_id, requestId: request.id, folderJobId: id },
+        { directory: preview.directory, username: preview.username, selectedBytes, evidence });
     });
     return id;
   }

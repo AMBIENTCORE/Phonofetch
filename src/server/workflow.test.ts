@@ -154,7 +154,8 @@ describe("authenticated mixed-batch workflow", () => {
     const previewResponse = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
       .send({ candidateId: item.candidates[0].id, recursive: false });
     expect(previewResponse.status).toBe(200);
-    expect(previewResponse.body).toMatchObject({ eligible_count: 2, excluded_count: 1 });
+    expect(previewResponse.body).toMatchObject({ eligible_count: 2, excluded_count: 1,
+      audio_bytes: 300, eligible_bytes: 200 });
     expect(previewResponse.body.files).toHaveLength(3);
     expect(previewResponse.body.files.some((file: RemoteFile) => file.path.includes("Sibling"))).toBe(false);
     expect(previewResponse.body.files.some((file: RemoteFile) => file.path.includes("Nested"))).toBe(false);
@@ -168,7 +169,8 @@ describe("authenticated mixed-batch workflow", () => {
     await worker.runOnce();
     const updated = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
     expect(updated.status).toBe("partial");
-    expect(updated.jobs[0]).toMatchObject({ eligible_count: 2, excluded_count: 1, status: "partial" });
+    expect(updated.jobs[0]).toMatchObject({ eligible_count: 2, excluded_count: 1,
+      selected_count: 2, unselected_count: 0, status: "partial" });
     expect(updated.transfers.map((t: { status: string }) => t.status)).toEqual(["completed", "failed"]);
     const failed = updated.transfers.find((t: { status: string }) => t.status === "failed");
     expect((await request(app).post(`/api/transfers/${failed.id}/retry`).set(auth).send({})).status).toBe(202);
@@ -180,6 +182,63 @@ describe("authenticated mixed-batch workflow", () => {
     expect(recovered.status).toBe("partial");
     expect(recovered.transfers.every((t: { status: string }) => t.status === "completed")).toBe(true);
     expect(recovered.transfers.find((t: { id: string }) => t.id === failed.id).retries).toBe(1);
+  });
+
+  it("queues only checked quality-eligible files and records an intentionally partial folder", async () => {
+    const { app, worker, store, transfers, port } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[1]!.original, defaultType: "album_folder", mode: "review", entries: [entries[1]]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const inspected = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id, recursive: false });
+    const previewId = inspected.body.id as string;
+    const eligiblePath = inspected.body.files.find((file: { eligible: boolean }) => file.eligible).path as string;
+    const excludedPath = inspected.body.files.find((file: { eligible: boolean }) => !file.eligible).path as string;
+    for (const paths of [[excludedPath], ["alice\\Burial\\Another\\04 - Sibling.flac"], []]) {
+      expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+        .send({ previewId, selectedPaths: paths })).status).toBe(422);
+    }
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId, selectedPaths: [eligiblePath, eligiblePath] })).status).toBe(400);
+    expect(store.all("SELECT * FROM transfers")).toHaveLength(0);
+    const queued = await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId, selectedPaths: [eligiblePath] });
+    expect(queued.status).toBe(202);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledTimes(1);
+    expect(transfers[0]?.path).toBe(eligiblePath);
+    const job = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0].jobs[0];
+    expect(job).toMatchObject({ discovered_count: 3, eligible_count: 2, excluded_count: 1,
+      selected_count: 1, unselected_count: 1, estimated_bytes: 100 });
+    transfers[0]!.status = "completed"; transfers[0]!.transferred = 100;
+    await worker.runOnce();
+    expect((await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0].status).toBe("partial");
+  });
+
+  it("marks a folder partial when only one of two otherwise eligible files was selected", async () => {
+    const { app, worker, folderFiles, transfers } = setup();
+    folderFiles.splice(2, 1);
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[1]!.original, defaultType: "album_folder", mode: "review", entries: [entries[1]]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const inspected = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(inspected.body).toMatchObject({ eligible_count: 2, excluded_count: 0, audio_bytes: 200 });
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth).send({
+      previewId: inspected.body.id, selectedPaths: [inspected.body.files[0].path]
+    })).status).toBe(202);
+    await worker.runOnce();
+    transfers[0]!.status = "completed"; transfers[0]!.transferred = 100;
+    await worker.runOnce();
+    const result = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(result.status).toBe("partial");
+    expect(result.jobs[0]).toMatchObject({ excluded_count: 0, selected_count: 1, unselected_count: 1 });
   });
 
   it("rejects changed remote folders and limits recursive scope", async () => {
