@@ -39,7 +39,7 @@ Requirements: Docker Engine with the **existing** `phonofetch_net` external netw
 
 ### Files for a source repository
 
-The NAS image build needs `Dockerfile`, `package.json`, `package-lock.json`, `tsconfig.json`, `vite.config.ts`, `index.html`, `src/`, and `public/`. Also keep `.dockerignore` so local secrets and generated files are not sent to the Docker build context. Include `compose.yaml`, `.env.example`, `.gitignore`, and this README for deployment and documentation.
+The NAS image build needs `Dockerfile`, `package.json`, `package-lock.json`, `tsconfig.json`, `vite.config.ts`, `index.html`, `src/`, and `public/`. Also keep `.dockerignore` so local secrets and generated files are not sent to the Docker build context. Include `compose.yaml`, `.env.example`, `.gitignore`, `scripts/update-nas.sh`, and this README for deployment and documentation.
 
 Do **not** commit `.env` or other `.env.*` files (except `.env.example`), `.npmrc`, databases, `node_modules/`, `dist/`, logs, image archives, or NAS credentials. The real API key, login password, and session secret are configured **on the NAS** through a private `.env` or Portainer environment. The provided `.gitignore` excludes the common local variants, but check the files you stage before publishing.
 
@@ -83,14 +83,34 @@ Compose maps NAS port `7289` to container port `3000`; it does not publish slskd
 
 ### Updating without copying source to the NAS
 
-The initial local-build instructions above remain valid. For repeat updates, an image registry is easier: publish a Phonofetch image under a versioned tag, set `PHONOFETCH_IMAGE` in the **NAS-only** `.env` (for example `ghcr.io/YOUR-OWNER/phonofetch:v1`), then run on the NAS:
+For the existing **CLI-managed** Compose installation, `scripts/update-nas.sh` replaces the repeated download/build/backup/recreate commands with **one NAS command per update**. It requires no Git installation on the NAS, image registry, GitHub token, or changes to the existing slskd or Nicotine+ containers.
+
+After publishing the script to GitHub, install it **once** in the existing NAS Compose directory (not the lowercase `/volume2/docker/phonofetch` data directory):
+
+```sh
+curl -fL https://raw.githubusercontent.com/AMBIENTCORE/Phonofetch/main/scripts/update-nas.sh \
+  -o /volume2/docker/Phonofetch/update.sh
+sh /volume2/docker/Phonofetch/update.sh --check
+```
+
+Review the downloaded script before running it. The check confirms that `phonofetch` is the **only** service in the original `/volume2/docker/Phonofetch/compose.yaml`, its local image is `phonofetch:local`, its `/data` mount points to `/volume2/docker/phonofetch`, and the existing NAS-only `.env` and SQLite file are present. It prints neither credentials nor Compose configuration.
+
+After each later GitHub push, run **one command** over NAS SSH:
+
+```sh
+sh /volume2/docker/Phonofetch/update.sh
+```
+
+The updater downloads a fresh GitHub `main` source archive into a new build directory, preserves the currently running image under a timestamped rollback tag, builds `phonofetch:local` while the app remains online, stops **only** Phonofetch briefly for a consistent timestamped SQLite backup, restarts it, then recreates **only** `phonofetch` in the **existing** Compose project and verifies its image ID, health and HTTP endpoint. It refuses mismatched services, image, paths and data mounts. If the build or backup fails, it leaves or restarts the previous container; if deployment or health fails, it stops and reports the backup path. It does **not** automatically roll back the image: a new image may already have migrated SQLite, and restoring an older image alone would be unsafe. Do not schedule unattended updates without a plan for database migration and recovery. The script leaves downloaded build directories and rollback images for diagnosis; inspect disk usage and remove only specific old versions when you no longer need them. If this script changes in GitHub, download and review the new version explicitly.
+
+Alternatively, a GHCR image removes NAS-side builds: publish a Phonofetch image under a versioned tag, set `PHONOFETCH_IMAGE` in the **NAS-only** `.env` (for example `ghcr.io/YOUR-OWNER/phonofetch:v1`), then run on the NAS:
 
 ```sh
 docker compose --env-file .env -f compose.yaml pull phonofetch
 docker compose --env-file .env -f compose.yaml up -d --no-deps phonofetch
 ```
 
-A private GitHub repository with a GHCR build workflow is one possible image source, but **no GitHub repository or image publication is configured by this project**. If you choose that route, create and publish it yourself, do not add `.env` or passwords to the repository, and configure NAS registry read access for a private package. Copy `compose.yaml` to the NAS once; the NAS can then pull versioned images without receiving source files or rebuilding them. The raw slskd key, application password and session secret remain in the NAS's private `.env` (or Portainer's NAS-hosted stack environment), not in GitHub or the image. Back up `/volume2/docker/phonofetch` before upgrades; only recreate Phonofetch.
+No GHCR build workflow or published image is configured by this project. If you choose that route later, configure the registry separately and keep `.env`/passwords out of GitHub and the image. A private package additionally requires NAS-side registry read access. Back up `/volume2/docker/phonofetch` before upgrades; only recreate Phonofetch.
 
 Without any external registry, build the image on a machine with Docker, use `docker save -o phonofetch-image.tar phonofetch:local`, transfer **that image archive** to the NAS, run `docker load -i phonofetch-image.tar` there, and recreate only Phonofetch with `docker compose --env-file .env -f compose.yaml up -d --no-deps --force-recreate phonofetch`. This avoids copying source or building on the NAS, but still transfers an image per update.
 
