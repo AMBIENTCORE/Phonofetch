@@ -38,7 +38,8 @@ function setup() {
     remote("alice\\Burial\\Untrue\\cover.jpg"),
     remote("alice\\Burial\\Another\\04 - Sibling.flac"),
     remote("alice\\Burial\\Untrue\\CD2\\05 - Nested.flac")];
-  let searchSnapshot: SearchSnapshot = { id: "search-1", finished: true, results: [folderFiles[0]!] };
+  let searchSnapshot: SearchSnapshot = { id: "search-1", state: "Completed", finished: true,
+    reportedFileCount: 1, reportedResponseCount: 1, results: [folderFiles[0]!] };
   const port: SlskdPort = {
     check: vi.fn(async () => {}),
     startSearch: vi.fn(async () => "search-1"),
@@ -242,7 +243,8 @@ describe("authenticated mixed-batch workflow", () => {
     const { app, worker, store, port, folderFiles, transfers, setSnapshot } = setup();
     folderFiles.splice(0, folderFiles.length, ...Array.from({ length: 8 }, (_, i) =>
       remote(`alice\\Burial\\Untrue\\${String(i + 1).padStart(2, "0")} - Song.flac`)));
-    setSnapshot({ id: "search-1", finished: true, results: [folderFiles[0]!] });
+    setSnapshot({ id: "search-1", state: "Completed", finished: true,
+      reportedFileCount: 1, reportedResponseCount: 1, results: [folderFiles[0]!] });
     const auth = await login(app);
     const created = await request(app).post("/api/batches").set(auth).send({
       originalInput: entries[1]!.original,

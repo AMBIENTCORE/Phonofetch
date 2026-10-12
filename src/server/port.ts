@@ -2,7 +2,10 @@ import type { RemoteFile, TransferStatus } from "../shared/types";
 
 export interface SearchSnapshot {
   id: string;
+  state: string;
   finished: boolean;
+  reportedFileCount: number;
+  reportedResponseCount: number;
   results: RemoteFile[];
 }
 

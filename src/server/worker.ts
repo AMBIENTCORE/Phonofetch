@@ -13,6 +13,7 @@ export class Worker {
   private running = false;
   private stopped = false;
   private connected: boolean | null = null;
+  private lastConnectivityCheck = 0;
   constructor(private readonly store: Store, private readonly port: SlskdPort,
     private readonly config: Config, private readonly workflow: Workflow) {}
 
@@ -56,11 +57,14 @@ export class Worker {
     try {
       let live: RemoteTransfer[];
       try {
-        if (this.connected !== true) await this.port.check();
+        if (this.connected !== true || Date.now() - this.lastConnectivityCheck > 30000) {
+          await this.port.check();
+          this.lastConnectivityCheck = Date.now();
+        }
         live = await this.port.transfers();
         if (this.connected !== true) {
           this.connected = true;
-          this.store.event("success", "slskd", "connected", "slskd authenticated; transfer reconciliation available");
+          this.store.event("success", "slskd", "connected", "slskd authenticated and logged in to Soulseek; transfer reconciliation available");
         }
       } catch (error) {
         if (this.connected !== false) {
@@ -150,6 +154,17 @@ export class Worker {
     try {
       const snapshot = await this.port.getSearch(request.search_id);
       if (!snapshot.finished) return;
+      if (/\bErrored\b/i.test(snapshot.state)) {
+        this.retrySearch(request, new Error(`slskd search ended in ${snapshot.state} with ${snapshot.reportedResponseCount} responses`));
+        return;
+      }
+      if (/\bCancelled\b/i.test(snapshot.state)) {
+        this.store.run("UPDATE requests SET status='cancelled',error=?,updated_at=? WHERE id=?",
+          `slskd search was cancelled (${snapshot.state})`, new Date().toISOString(), request.id);
+        this.store.event("warning", "search", "cancelled", `slskd search ${request.search_id} was cancelled`,
+          { batchId: request.batch_id, requestId: request.id });
+        return;
+      }
       const dedup = new Map<string, RemoteFile>();
       for (const file of snapshot.results) {
         dedup.set(`${file.username}\0${file.path}`, file);
@@ -172,8 +187,9 @@ export class Worker {
           hasEligible ? null : candidates.length ? "No files met the selected quality requirements" : "Soulseek returned no files for this text search",
           new Date().toISOString(), request.id);
         this.store.event("info", "search", "completed",
-          `Search finished: ${snapshot.results.length} files returned, ${candidates.length} distinct, ${candidates.filter(c => c.eligible).length} eligible`,
-          { batchId: request.batch_id, requestId: request.id });
+          `Search ${snapshot.state}: ${snapshot.results.length} files returned, ${candidates.length} distinct, ${candidates.filter(c => c.eligible).length} eligible`,
+          { batchId: request.batch_id, requestId: request.id },
+          { searchId: request.search_id, reportedFileCount: snapshot.reportedFileCount, reportedResponseCount: snapshot.reportedResponseCount });
         for (const candidate of candidates)
           this.store.event(candidate.eligible ? "info" : "warning", "quality",
             candidate.eligible ? "candidate_ranked" : "candidate_excluded",

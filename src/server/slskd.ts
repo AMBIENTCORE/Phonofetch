@@ -14,7 +14,10 @@ const remoteFile = z.object({
   attributes: z.array(z.object({ type: z.number(), value: z.number() })).optional()
 });
 const directory = z.object({ name: z.string().min(1), files: z.array(remoteFile) });
-const search = z.object({ id: z.string(), state: z.string() });
+const search = z.object({
+  id: z.string(), state: z.string(),
+  fileCount: z.number().int().nonnegative(), responseCount: z.number().int().nonnegative()
+});
 const response = z.object({ username: z.string().min(1), files: z.array(remoteFile) });
 const transfer = z.object({
   id: z.string().min(1), batchId: z.string().nullable().optional(),
@@ -97,18 +100,24 @@ export class SlskdAdapter implements SlskdPort {
 
   async check(): Promise<void> {
     await this.call("GET", "/api/v0/session", z.unknown());
+    const server = await this.call("GET", "/api/v0/server",
+      z.object({ isConnected: z.boolean(), isLoggedIn: z.boolean() }));
+    if (!server.isConnected || !server.isLoggedIn)
+      throw new Error(`slskd API reachable, but Soulseek is ${server.isConnected ? "connected" : "disconnected"} and ${server.isLoggedIn ? "logged in" : "not logged in"}`);
   }
 
   async startSearch(query: string): Promise<string> {
     const created = await this.call("POST", "/api/v0/searches", search,
-      { searchText: query, fileLimit: this.resultLimit, searchTimeout: Math.max(5, Math.floor(this.timeoutMs / 1000) - 5) });
+      { searchText: query, fileLimit: this.resultLimit, searchTimeout: Math.max(5000, this.timeoutMs - 5000) });
     return created.id;
   }
 
   async getSearch(id: string): Promise<SearchSnapshot> {
     const state = await this.call("GET", `/api/v0/searches/${encodeURIComponent(id)}`, search);
     const finished = /\bCompleted\b/i.test(state.state);
-    if (!finished) return { id, finished: false, results: [] };
+    const snapshot = { id: state.id, state: state.state, finished,
+      reportedFileCount: state.fileCount, reportedResponseCount: state.responseCount };
+    if (!finished || /\bErrored\b|\bCancelled\b/i.test(state.state)) return { ...snapshot, results: [] };
     const responses = await this.call("GET", `/api/v0/searches/${encodeURIComponent(id)}/responses`, z.array(response));
     const files: RemoteFile[] = [];
     for (const item of responses) for (const file of item.files) {
@@ -116,7 +125,9 @@ export class SlskdAdapter implements SlskdPort {
       files.push({ username: item.username, path: file.filename, directory: parentDirectory(file.filename),
         size: file.size, metadata: this.meta(file) });
     }
-    return { id: state.id, finished: true, results: files };
+    if (state.fileCount > 0 && files.length === 0)
+      throw new Error(`slskd reports ${state.fileCount} search files, but its responses endpoint returned none`);
+    return { ...snapshot, results: files };
   }
 
   async browse(username: string, selectedDirectory: string, recursive: boolean): Promise<RemoteFile[]> {

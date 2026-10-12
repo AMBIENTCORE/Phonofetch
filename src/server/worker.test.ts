@@ -18,7 +18,7 @@ function harness() {
     DATABASE_PATH: join(dir, "db.sqlite"), SLSKD_API_KEY: "secret",
     PHONOFETCH_AUTH_USERNAME: "admin", PHONOFETCH_AUTH_PASSWORD: "a-very-long-password",
     PHONOFETCH_SESSION_SECRET: "a-secret-of-at-least-thirty-two-characters",
-    SEARCH_TIMEOUT_MS: "5000", MAX_RETRIES: "2"
+    SEARCH_TIMEOUT_MS: "10000", MAX_RETRIES: "2"
   });
   const store = new Store(config.DATABASE_PATH);
   const holder = { current: store };
@@ -35,7 +35,8 @@ function harness() {
   const port: SlskdPort = {
     check: vi.fn(async () => {}),
     startSearch: vi.fn(async () => "search-id"),
-    getSearch: vi.fn(async () => ({ id: "search-id", finished: false, results: [] })),
+    getSearch: vi.fn(async () => ({ id: "search-id", state: "InProgress", finished: false,
+      reportedFileCount: 0, reportedResponseCount: 0, results: [] })),
     browse: vi.fn(async () => []),
     transfers: vi.fn(async () => live),
     enqueue: vi.fn(async (_username, _file, transferId) => {
@@ -59,12 +60,41 @@ describe("worker retries and recovery", () => {
   it("sends flat normalized Soulseek text and distinguishes zero files from quality exclusions", async () => {
     const h = harness();
     h.store.run("UPDATE requests SET query_text=? WHERE id=?", "Ben Klock - Subzero", h.id);
-    vi.mocked(h.port.getSearch).mockResolvedValueOnce({ id: "search-id", finished: true, results: [] });
+    vi.mocked(h.port.getSearch).mockResolvedValueOnce({ id: "search-id", state: "Completed", finished: true,
+      reportedFileCount: 0, reportedResponseCount: 0, results: [] });
     await h.worker.runOnce();
     expect(h.port.startSearch).toHaveBeenCalledWith("ben klock subzero");
     expect(h.getRequest()).toMatchObject({ status: "no_results", error: "Soulseek returned no files for this text search" });
     expect(h.store.activity({ category: "search", search: "Soulseek text search: ben klock subzero" })).toHaveLength(1);
     expect(h.store.activity({ category: "search", search: "0 files returned" })).toHaveLength(1);
+  });
+
+  it("retries an errored slskd search instead of misreporting no results", async () => {
+    const h = harness();
+    vi.mocked(h.port.getSearch).mockResolvedValue({
+      id: "search-id", state: "Completed, Errored", finished: true,
+      reportedFileCount: 0, reportedResponseCount: 0, results: []
+    });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      h.store.run("UPDATE requests SET next_attempt_at=? WHERE id=?", new Date(0).toISOString(), h.id);
+      await h.worker.runOnce();
+    }
+    expect(h.getRequest()).toMatchObject({ status: "failed", retries: 2 });
+    expect(h.getRequest().error).toContain("Errored");
+    expect(h.port.startSearch).toHaveBeenCalledTimes(3);
+    expect(h.store.activity({ category: "search", search: "bounded retries" })).toHaveLength(1);
+  });
+
+  it("does not automatically restart a search cancelled in slskd", async () => {
+    const h = harness();
+    vi.mocked(h.port.getSearch).mockResolvedValueOnce({
+      id: "search-id", state: "Completed, Cancelled", finished: true,
+      reportedFileCount: 0, reportedResponseCount: 0, results: []
+    });
+    await h.worker.runOnce();
+    expect(h.getRequest().status).toBe("cancelled");
+    await h.worker.runOnce();
+    expect(h.port.startSearch).toHaveBeenCalledTimes(1);
   });
 
   it("keeps searches pending while slskd is unavailable and reports the connection state", async () => {

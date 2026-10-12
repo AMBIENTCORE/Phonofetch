@@ -16,22 +16,23 @@ describe("slskd 0.26.1 REST adapter", () => {
       expect(init?.headers).toMatchObject({ "X-API-Key": "secret" });
       const url = String(input);
       if (url.endsWith("/api/v0/session")) return new Response(null, { status: 200 });
+      if (url.endsWith("/api/v0/server")) return json({ isConnected: true, isLoggedIn: true, state: "Connected, LoggedIn" });
       if (url.endsWith("/api/v0/searches") && init?.method === "POST") {
-        expect(JSON.parse(String(init.body))).toMatchObject({ searchText: "Burial Archangel", fileLimit: 5, searchTimeout: 5 });
-        return json({ id: "search-id", state: "InProgress", searchText: "Burial Archangel" });
+        expect(JSON.parse(String(init.body))).toMatchObject({ searchText: "Burial Archangel", fileLimit: 5, searchTimeout: 40000 });
+        return json({ id: "search-id", state: "InProgress", fileCount: 0, responseCount: 0, searchText: "Burial Archangel" });
       }
-      if (url.endsWith("/api/v0/searches/search-id")) return json({ id: "search-id", state: "Completed" });
+      if (url.endsWith("/api/v0/searches/search-id")) return json({ id: "search-id", state: "Completed", fileCount: 2, responseCount: 1 });
       if (url.endsWith("/api/v0/searches/search-id/responses")) return json([
         { username: "alice", files: [file("Burial\\Untrue\\01 Archangel.mp3"),
           { filename: "Burial\\Untrue\\02 Missing.mp3", size: 100, code: 1 }] }
       ]);
       throw new Error(`Unexpected request ${url}`);
     });
-    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 5, fetcher);
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 45000, 5, fetcher);
     await adapter.check();
     expect(await adapter.startSearch("Burial Archangel")).toBe("search-id");
     const snapshot = await adapter.getSearch("search-id");
-    expect(snapshot.finished).toBe(true);
+    expect(snapshot).toMatchObject({ finished: true, state: "Completed", reportedFileCount: 2, reportedResponseCount: 1 });
     expect(snapshot.results).toHaveLength(2);
     expect(snapshot.results[0]).toMatchObject({
       username: "alice", path: "Burial\\Untrue\\01 Archangel.mp3", directory: "Burial\\Untrue",
@@ -121,5 +122,26 @@ describe("slskd 0.26.1 REST adapter", () => {
     await expect(timed.check()).rejects.toThrow("timed out");
     await expect(timed.startSearch("Artist Title")).rejects.toThrow("timed out");
     await expect(timed.browse("alice", "Album", false)).rejects.toThrow("timed out");
+  });
+
+  it("does not treat an authenticated but disconnected Soulseek client as search-ready", async () => {
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10,
+      vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/session") ?
+        new Response(null, { status: 200 }) : json({ isConnected: false, isLoggedIn: false, state: "Disconnected" })));
+    await expect(adapter.check()).rejects.toThrow("Soulseek is disconnected and not logged in");
+  });
+
+  it("does not treat an empty responses endpoint as zero results when slskd reports files", async () => {
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10,
+      vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/responses") ? json([]) :
+        json({ id: "search-id", state: "Completed", fileCount: 12, responseCount: 2 })));
+    await expect(adapter.getSearch("search-id")).rejects.toThrow("reports 12 search files");
+  });
+
+  it("preserves errored search state without fetching potentially absent responses", async () => {
+    const fetcher = vi.fn(async () => json({ id: "search-id", state: "Completed, Errored", fileCount: 0, responseCount: 0 }));
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+    expect(await adapter.getSearch("search-id")).toMatchObject({ finished: true, state: "Completed, Errored", results: [] });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });

@@ -10,7 +10,7 @@ const configSchema = z.object({
   PHONOFETCH_SESSION_SECRET: z.string().min(32),
   TRUST_PROXY: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   SEARCH_CONCURRENCY: z.coerce.number().int().min(1).max(5).default(2),
-  SEARCH_TIMEOUT_MS: z.coerce.number().int().min(5000).max(120000).default(45000),
+  SEARCH_TIMEOUT_MS: z.coerce.number().int().min(10000).max(120000).default(45000),
   SEARCH_RESULT_LIMIT: z.coerce.number().int().min(1).max(500).default(120),
   MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(3),
   AUTO_TRACK_SCORE: z.coerce.number().min(0.8).max(1).default(0.93),
