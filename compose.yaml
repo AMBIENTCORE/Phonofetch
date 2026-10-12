@@ -1,0 +1,35 @@
+services:
+  phonofetch:
+    image: ${PHONOFETCH_IMAGE:-phonofetch:local}
+    container_name: phonofetch
+    restart: unless-stopped
+    stop_grace_period: 150s
+    ports:
+      - "7289:3000"
+    volumes:
+      - /volume2/docker/phonofetch:/data
+    networks:
+      - phonofetch_net
+    environment:
+      PORT: "3000"
+      TZ: Europe/Lisbon
+      DATABASE_PATH: /data/phonofetch.sqlite
+      SLSKD_BASE_URL: http://slskd:5030
+      SLSKD_API_KEY: ${SLSKD_API_KEY:?Set a raw ReadWrite API secret}
+      PHONOFETCH_AUTH_USERNAME: ${PHONOFETCH_AUTH_USERNAME:?Set a username}
+      PHONOFETCH_AUTH_PASSWORD: ${PHONOFETCH_AUTH_PASSWORD:?Set a strong password}
+      PHONOFETCH_SESSION_SECRET: ${PHONOFETCH_SESSION_SECRET:?Set at least 32 random characters}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      SEARCH_CONCURRENCY: ${SEARCH_CONCURRENCY:-2}
+      SEARCH_TIMEOUT_MS: ${SEARCH_TIMEOUT_MS:-45000}
+      SEARCH_RESULT_LIMIT: ${SEARCH_RESULT_LIMIT:-120}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      AUTO_TRACK_SCORE: ${AUTO_TRACK_SCORE:-0.93}
+      AUTO_ALBUM_SCORE: ${AUTO_ALBUM_SCORE:-0.98}
+      MAX_FOLDER_FILES: ${MAX_FOLDER_FILES:-250}
+      MAX_FOLDER_BYTES: ${MAX_FOLDER_BYTES:-10737418240}
+
+networks:
+  phonofetch_net:
+    external: true
+    name: phonofetch_net

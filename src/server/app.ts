@@ -1,0 +1,225 @@
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import express, { type ErrorRequestHandler, type Express } from "express";
+import { z, ZodError } from "zod";
+import type { Batch, Candidate, FolderPreview, MusicRequest, Quality } from "../shared/types";
+import { ApiError, installAuth } from "./auth";
+import type { Config } from "./config";
+import { Store } from "./db";
+import { normalize, parseLines } from "./matching";
+import type { SlskdPort } from "./port";
+import { Workflow } from "./workflow";
+
+const uuid = z.uuid();
+const entry = z.object({
+  original: z.string().min(1).max(256),
+  queryText: z.string().trim().min(1).max(256),
+  type: z.enum(["track", "album_folder"]),
+  seedKind: z.enum(["track_seed", "album_title"]),
+  quality: z.enum(["mp3_320", "flac", "any"])
+});
+const newBatch = z.object({
+  originalInput: z.string().min(1).max(32768),
+  defaultType: z.enum(["track", "album_folder"]),
+  mode: z.enum(["review", "automatic"]),
+  entries: z.array(entry).min(1).max(100)
+});
+
+export function createApp(store: Store, port: SlskdPort, config: Config, workflow: Workflow): Express {
+  const app = express();
+  app.disable("x-powered-by");
+  if (config.TRUST_PROXY) app.set("trust proxy", 1);
+  app.use(express.json({ limit: "80kb", type: "application/json" }));
+  app.use((_, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
+    next();
+  });
+  app.get("/api/health", (_, res) => {
+    store.get("SELECT 1 AS ready");
+    res.json({ status: "ok" });
+  });
+  installAuth(app, store, config);
+  app.get("/api/dashboard", (_, res) => {
+    const batches = store.all<Batch & { total: number; completed: number; active: number; unresolved: number }>(
+      `SELECT b.*,COUNT(r.id) AS total,
+        SUM(CASE WHEN r.status IN ('completed','partial') THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN r.status IN ('queueing','active','searching') THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN r.status IN ('review','no_results','failed') THEN 1 ELSE 0 END) AS unresolved
+        FROM batches b LEFT JOIN requests r ON r.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100`);
+    const counts: Record<string, number> = Object.fromEntries(store.all<{ status: string; count: number }>(
+      "SELECT status,COUNT(*) AS count FROM requests GROUP BY status").map(row => [row.status, row.count]));
+    counts.active = (counts.active ?? 0) + (counts.searching ?? 0) + (counts.queueing ?? 0);
+    counts.review = (counts.review ?? 0) + (counts.no_results ?? 0);
+    counts.failed = (counts.failed ?? 0) + (counts.uncertain ?? 0);
+    res.json({ batches, counts, slskd_status: store.slskdStatus(), activity: store.activity({ limit: 8 }) });
+  });
+  app.post("/api/batches", (req, res) => {
+    const body = newBatch.parse(req.body);
+    const sourceLines = parseLines(body.originalInput, body.defaultType);
+    if (sourceLines.length > 100) throw new ApiError(400, "A batch can contain at most 100 nonempty lines");
+    const available = new Map<string, number>();
+    for (const line of sourceLines) available.set(line.original, (available.get(line.original) ?? 0) + 1);
+    const seen = new Set<string>();
+    for (const item of body.entries) {
+      const remaining = available.get(item.original) ?? 0;
+      if (!remaining) throw new ApiError(400, "Reviewed entry is not in the original batch input");
+      available.set(item.original, remaining - 1);
+      if (item.type === "track" && item.seedKind !== "track_seed") throw new ApiError(400, "Track requests must use track seed");
+      if (!normalize(item.queryText)) throw new ApiError(400, "Search line must contain searchable text");
+      const key = `${normalize(item.queryText)}\0${item.type}\0${item.seedKind}`;
+      if (seen.has(key)) {
+        store.event("warning", "batch", "duplicate_detected", `Duplicate request detected: ${item.queryText}`);
+        throw new ApiError(400, "Duplicate requests must be removed or edited before submission");
+      }
+      seen.add(key);
+    }
+    const id = randomUUID();
+    const date = new Date().toISOString();
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Lisbon", year: "numeric", month: "2-digit", day: "2-digit"
+    }).formatToParts(new Date(date));
+    const datePart = (type: Intl.DateTimeFormatPartTypes): string => {
+      const part = parts.find(item => item.type === type);
+      if (!part) throw new Error(`Could not format batch date: ${type}`);
+      return part.value;
+    };
+    let number = 0;
+    let name = "";
+    store.transaction(() => {
+      const next = store.get<{ value: number }>("SELECT COALESCE(MAX(number),0)+1 AS value FROM batches");
+      if (!next) throw new Error("Could not allocate batch number");
+      number = next.value;
+      name = `Batch #${number} [${datePart("year")}-${datePart("month")}-${datePart("day")}]`;
+      store.run("INSERT INTO batches(id,number,name,original_input,default_type,mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        id, number, name, body.originalInput, body.defaultType, body.mode, date, date);
+      for (const [position, item] of body.entries.entries()) {
+        const requestId = randomUUID();
+        store.run(`INSERT INTO requests(id,batch_id,position,query_text,type,seed_kind,artist,title,original_input,norm_artist,norm_title,quality,mode,status,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,'','',?,'','',?,?,'pending',?,?)`, requestId, id, position, item.queryText, item.type, item.seedKind,
+        item.original, item.quality, body.mode, date, date);
+        store.event("info", "batch", "parsed", `Parsed ${item.type}: ${item.queryText}`,
+          { batchId: id, requestId }, { quality: item.quality, seedKind: item.seedKind });
+      }
+      store.event("success", "batch", "created", `${name} created with ${body.entries.length} requests`,
+        { batchId: id }, { mode: body.mode });
+    });
+    res.status(201).json({ id, number, name });
+  });
+  app.get("/api/batches/:id", (req, res) => {
+    const detail = store.batchDetail(uuid.parse(req.params.id));
+    if (!detail) throw new ApiError(404, "Batch not found");
+    res.json(detail);
+  });
+  function getRequest(id: string): MusicRequest {
+    const request = store.get<MusicRequest>("SELECT * FROM requests WHERE id=?", uuid.parse(id));
+    if (!request) throw new ApiError(404, "Request not found");
+    return request;
+  }
+  function getCandidate(request: MusicRequest, id: string): Candidate {
+    const row = store.get<Omit<Candidate, "metadata" | "eligible" | "selected"> & { metadata: string; eligible: number; selected: number }>(
+      "SELECT * FROM candidates WHERE id=? AND request_id=?", uuid.parse(id), request.id);
+    if (!row) throw new ApiError(404, "Candidate not found");
+    return { ...row, metadata: JSON.parse(row.metadata) as Candidate["metadata"],
+      eligible: Boolean(row.eligible), selected: Boolean(row.selected) };
+  }
+  app.post("/api/requests/:id/select", (req, res) => {
+    const request = getRequest(req.params.id);
+    if (request.status !== "review") throw new ApiError(409, "Request is not awaiting review");
+    const { candidateId } = z.object({ candidateId: uuid }).parse(req.body);
+    res.status(202).json({ id: workflow.queueTrack(request, getCandidate(request, candidateId)) });
+  });
+  app.post("/api/requests/:id/preview", async (req, res) => {
+    const request = getRequest(req.params.id);
+    if (request.status !== "review" && request.status !== "no_results") throw new ApiError(409, "Request is not awaiting review");
+    const { candidateId, recursive } = z.object({ candidateId: uuid, recursive: z.boolean().default(false) }).parse(req.body);
+    res.json(await workflow.preview(request, getCandidate(request, candidateId), recursive));
+  });
+  app.post("/api/requests/:id/queue-folder", async (req, res) => {
+    const request = getRequest(req.params.id);
+    if (request.status !== "review" && request.status !== "no_results") throw new ApiError(409, "Request is not awaiting review");
+    const { previewId } = z.object({ previewId: uuid }).parse(req.body);
+    const row = store.get<Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "eligible_bytes"> & { files: string; recursive: number }>(
+      "SELECT * FROM folder_previews WHERE id=? AND request_id=?", previewId, request.id);
+    if (!row) throw new ApiError(404, "Folder preview not found");
+    res.status(202).json({ id: await workflow.queueFolder(request, store.inflatePreview(row)) });
+  });
+  app.post("/api/requests/:id/retry", (req, res) => {
+    const request = getRequest(req.params.id);
+    if (!["no_results", "failed", "review", "cancelled"].includes(request.status))
+      throw new ApiError(409, "Request cannot be retried while processing");
+    const { quality } = z.object({ quality: z.enum(["mp3_320", "flac", "any"]) }).parse(req.body);
+    workflow.retry(request, quality as Quality);
+    res.json({ ok: true });
+  });
+  app.post("/api/transfers/:id/cancel", async (req, res) => {
+    const id = uuid.parse(req.params.id);
+    const transfer = store.get<{ username: string; path: string; status: string; request_id: string; slskd_id: string | null }>(
+      "SELECT username,path,status,request_id,slskd_id FROM transfers WHERE id=?", id);
+    if (!transfer) throw new ApiError(404, "Transfer not found");
+    if (!["queued", "active"].includes(transfer.status)) throw new ApiError(409, "Transfer cannot be cancelled in this state");
+    const remoteId = transfer.slskd_id ?? (await port.transfers()).find(item =>
+      item.username === transfer.username && item.path === transfer.path)?.id;
+    if (!remoteId) throw new ApiError(409, "slskd transfer ID unavailable; wait for reconciliation");
+    await port.cancel(transfer.username, remoteId);
+    store.run("UPDATE transfers SET status='cancelled',updated_at=? WHERE id=?", new Date().toISOString(), id);
+    store.event("warning", "transfer", "cancelled", `Transfer cancelled: ${transfer.path}`,
+      { requestId: transfer.request_id, transferId: id });
+    res.json({ ok: true });
+  });
+  app.post("/api/transfers/:id/retry", async (req, res) => {
+    const id = uuid.parse(req.params.id);
+    const transfer = store.get<{ username: string; path: string; status: string; request_id: string; retries: number; slskd_id: string | null }>(
+      "SELECT username,path,status,request_id,retries,slskd_id FROM transfers WHERE id=?", id);
+    if (!transfer) throw new ApiError(404, "Transfer not found");
+    if (!["failed", "cancelled"].includes(transfer.status)) throw new ApiError(409, "Only a confirmed failed or cancelled transfer can be retried");
+    if (transfer.retries >= config.MAX_RETRIES) throw new ApiError(409, "Transfer retry limit reached");
+    const live = await port.transfers();
+    if (live.some(item => item.username === transfer.username && item.path === transfer.path &&
+      ["queued", "active", "completed"].includes(item.status)))
+      throw new ApiError(409, "slskd already reports this file; inspect its transfer before retrying");
+    const date = new Date().toISOString();
+    store.transaction(() => {
+      const current = store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", id);
+      if (!current || !["failed", "cancelled"].includes(current.status))
+        throw new ApiError(409, "Transfer state changed; retry not queued");
+      store.run(`UPDATE transfers SET queue_id=?,slskd_id=NULL,status='ready',transferred=0,progress=0,
+        error=NULL,retries=retries+1,updated_at=? WHERE id=?`, randomUUID(), date, id);
+      store.run("UPDATE requests SET status='queueing',updated_at=? WHERE id=?", date, transfer.request_id);
+      store.event("info", "transfer", "retry_requested", `Manual retry ${transfer.retries + 1}/${config.MAX_RETRIES} for ${transfer.path}`,
+        { requestId: transfer.request_id, transferId: id }, { previousSlskdId: transfer.slskd_id });
+    });
+    res.status(202).json({ ok: true });
+  });
+  app.get("/api/activity", (req, res) => {
+    const filters = z.object({
+      severity: z.enum(["info", "success", "warning", "error"]).optional(),
+      category: z.string().max(40).optional(),
+      batchId: uuid.optional(), requestId: uuid.optional(),
+      search: z.string().max(120).optional(),
+      cursor: z.coerce.number().int().positive().optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional()
+    }).parse(req.query);
+    res.json(store.activity(filters));
+  });
+  app.use("/api", (_, res) => { res.status(404).json({ error: "API route not found" }); });
+  const client = resolve(process.cwd(), "dist/client");
+  app.use(express.static(client));
+  app.use((req, res, next) => {
+    if (req.method === "GET" && !req.path.startsWith("/api")) { res.sendFile(resolve(client, "index.html")); return; }
+    next();
+  });
+  const errors: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
+    if (error instanceof ZodError) {
+      res.status(400).json({ error: `Invalid request: ${error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ")}` });
+      return;
+    }
+    if (error instanceof ApiError) { res.status(error.status).json({ error: store.redact(error.message) }); return; }
+    store.event("error", "api", "request_failed", `Request failed: ${store.redact(error instanceof Error ? error.message : "Unknown error")}`);
+    res.status(502).json({ error: "Request could not be completed; see the Activity Log" });
+  };
+  app.use(errors);
+  return app;
+}

@@ -1,0 +1,27 @@
+import type { RemoteFile, TransferStatus } from "../shared/types";
+
+export interface SearchSnapshot {
+  id: string;
+  finished: boolean;
+  results: RemoteFile[];
+}
+
+export interface RemoteTransfer {
+  id: string;
+  batchId: string | null;
+  username: string;
+  path: string;
+  size: number;
+  transferred: number;
+  status: Exclude<TransferStatus, "ready" | "queueing" | "uncertain">;
+}
+
+export interface SlskdPort {
+  check(): Promise<void>;
+  startSearch(query: string): Promise<string>;
+  getSearch(id: string): Promise<SearchSnapshot>;
+  browse(username: string, directory: string, recursive: boolean): Promise<RemoteFile[]>;
+  enqueue(username: string, file: RemoteFile, batchId: string): Promise<string | null>;
+  transfers(): Promise<RemoteTransfer[]>;
+  cancel(username: string, transferId: string): Promise<void>;
+}
