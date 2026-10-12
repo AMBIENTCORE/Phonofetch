@@ -10,7 +10,7 @@ RUN npm run build
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production PORT=3000 TZ=Europe/Lisbon DATABASE_PATH=/data/phonofetch.sqlite
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && mkdir /data && chown node:node /data
 COPY --from=build --chown=node:node /app/dist ./dist
 USER node

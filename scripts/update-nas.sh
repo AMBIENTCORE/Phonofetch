@@ -89,6 +89,11 @@ printf 'Building phonofetch:local; current container remains running.\n'
 docker build -t phonofetch:local "$source_dir" ||
   fail "Image build failed; current container remains running ($rollback_tag)"
 
+printf 'Checking that the non-root runtime can read its package and server entry point.\n'
+docker run --rm --network none --entrypoint node phonofetch:local -e \
+  'const fs = require("node:fs"); JSON.parse(fs.readFileSync("/app/package.json", "utf8")); fs.accessSync("/app/dist/server/main.js", fs.constants.R_OK)' ||
+  fail "Built image failed its non-root startup check; current container remains running ($rollback_tag)"
+
 new_image=$(docker image inspect phonofetch:local --format '{{.Id}}') ||
   fail "Could not inspect the built image"
 if [ "$new_image" = "$running_image" ]; then
@@ -107,8 +112,6 @@ if [ ! -s "$backup_dir/phonofetch.sqlite" ]; then
   docker start phonofetch || fail "Backup incomplete and existing container could not be restarted"
   fail "Backup incomplete; existing container restarted, no deployment attempted"
 fi
-docker start phonofetch ||
-  fail "Backup succeeded, but existing container could not be restarted. Backup: $backup_dir"
 
 printf 'Backup: %s\n' "$backup_dir"
 printf 'Recreating only the existing phonofetch service.\n'

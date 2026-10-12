@@ -50,6 +50,7 @@ case "$1" in
     esac ;;
   image) if [ "\${PHONOFETCH_TEST_SAME_IMAGE:-}" = 1 ]; then echo sha256:old; else echo sha256:new; fi ;;
   build) [ "\${PHONOFETCH_TEST_BUILD_FAIL:-}" != 1 ] ;;
+  run) [ "\${PHONOFETCH_TEST_SMOKE_FAIL:-}" != 1 ] ;;
   tag|stop|start) exit 0 ;;
   *) exit 2 ;;
 esac
@@ -123,8 +124,12 @@ describe("NAS updater", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("Update successful");
     expect(existsSync(deployed)).toBe(true);
-    expect(readFileSync(log, "utf8")).toContain("up -d --no-deps --force-recreate phonofetch");
-    expect(readFileSync(log, "utf8")).not.toContain("slskd");
+    const operations = readFileSync(log, "utf8");
+    expect(operations).toContain("up -d --no-deps --force-recreate phonofetch");
+    expect(operations).toContain("run --rm --network none --entrypoint node phonofetch:local");
+    expect(operations.indexOf("run --rm --network none")).toBeLessThan(operations.indexOf("stop phonofetch"));
+    expect(operations).not.toContain("start phonofetch");
+    expect(operations).not.toContain("slskd");
     const backups = readdirSync(deploy).filter(name => name.startsWith("phonofetch-data-backup-"));
     expect(backups).toHaveLength(1);
     expect(readFileSync(join(deploy, backups[0]!, "phonofetch.sqlite"), "utf8")).toBe("existing-database");
@@ -137,6 +142,17 @@ describe("NAS updater", () => {
     expect(result.stderr).toContain("Image build failed");
     expect(existsSync(deployed)).toBe(false);
     expect(readFileSync(log, "utf8")).not.toMatch(/\bstop phonofetch\b|\bup -d\b/);
+  });
+
+  it("keeps the existing app running when the non-root image smoke check fails", () => {
+    const { run, log, deployed } = harness();
+    const result = run(undefined, { PHONOFETCH_TEST_SMOKE_FAIL: "1" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Built image failed its non-root startup check");
+    expect(existsSync(deployed)).toBe(false);
+    const operations = readFileSync(log, "utf8");
+    expect(operations).toContain("run --rm --network none --entrypoint node phonofetch:local");
+    expect(operations).not.toMatch(/\bstop phonofetch\b|\bup -d\b/);
   });
 
   it("restarts the existing container and skips deployment if backup fails", () => {
