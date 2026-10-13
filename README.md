@@ -8,7 +8,8 @@ Phonofetch is a self-hosted, phone-friendly search and download manager for an *
 
 ## Search and download
 
-- Results are grouped by peer and folder. The leading folders are inspected automatically; expand **Other folders** or select **Inspect** to browse more. File and folder sizes are shown before downloading.
+- Results are grouped by peer and folder. The leading folders are inspected automatically; expand **Other folders** or select **Inspect** to browse more. Search hits can queue one file directly; selecting multiple files requires a verified folder inspection. File and folder sizes are shown before downloading.
+- If a peer's folder is too large to inspect, queue a supported audio file directly from its search hits. The `MAX_FOLDER_FILES` preview limit counts supported audio files, not cover art or other extras; raise it in the NAS-only `.env` only if you need larger folder previews.
 - File rows show type and peer-reported bitrate (for example, **MP3 · 320 kbps**). **? kbps** means the peer did not supply a reliable value; Phonofetch never infers it from the filename or size.
 - Select files with checkboxes and **Download selected**, use **Download all** for the eligible files in a folder, or right-click a file. A track search downloads one selected file.
 - Results start on **All**. After searching, filter by **FLAC**, **MP3 320** (peer-reported bitrate), or terms such as `-live`, `minbr:320` and `iscbr`. Add `iscbr` if confirmed constant bitrate is required. Unknown-bitrate files remain visible and selectable under All.

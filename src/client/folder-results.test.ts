@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RequestStatus } from "../shared/types";
-import { AUTO_FOLDER_PREVIEW_LIMIT, autoFolderPreviews, folderKey } from "./folder-results";
+import { AUTO_FOLDER_PREVIEW_LIMIT, autoFolderPreviews, folderKey, searchHitQueueReason } from "./folder-results";
 
 const request = (status: RequestStatus = "review") => ({
   id: "request-1", type: "album_folder" as const, status,
@@ -20,6 +20,26 @@ describe("bounded folder inspection", () => {
     expect(picked.map(candidate => candidate.candidateId)).toEqual([
       "candidate-0", "candidate-1", "candidate-2", "candidate-3", "candidate-4"
     ]);
+  });
+
+  describe("search-hit queue availability", () => {
+    const hit = { eligible: true, reason: "Any quality explicitly selected" };
+
+    it("keeps single-file downloads available when folder inspection fails or is busy", () => {
+      const search = { type: "search" as const, status: "review" as const, transfers: [] };
+      expect(searchHitQueueReason(search, hit)).toBeNull();
+      expect(searchHitQueueReason(search, { eligible: false, reason: "Not a supported audio file" }))
+        .toBe("Not a supported audio file");
+    });
+
+    it("explains why a saved result cannot be queued without inspection", () => {
+      expect(searchHitQueueReason({ type: "album_folder", status: "review", transfers: [] }, hit))
+        .toBe("Inspect to download");
+      expect(searchHitQueueReason({ type: "search", status: "queueing", transfers: [{}] }, hit))
+        .toBe("Already queued; search again");
+      expect(searchHitQueueReason({ type: "search", status: "no_results", transfers: [] }, hit))
+        .toBe("Search not ready");
+    });
   });
 
   it("skips already inspected or attempted folders, other request types and completed jobs", () => {

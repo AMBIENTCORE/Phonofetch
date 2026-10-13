@@ -233,10 +233,10 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .folder-candidate > .candidate { border-top: 0; padding: .35rem 0; }
 .folder-search-hits { max-height: 125px; overflow: auto; margin-bottom: .5rem; padding: .3rem .5rem; border-left: 2px solid #666; font-size: .88rem; }
 .folder-search-hits small { margin-bottom: .25rem; }
-.folder-hit { display: grid; grid-template-columns: minmax(0, 1fr) minmax(86px, 22%) max-content; gap: .5rem; min-width: 0; padding: .15rem 0; }
+.folder-hit { display: grid; grid-template-columns: minmax(0, 1fr) minmax(86px, 22%) max-content; align-items: center; gap: .5rem; min-width: 0; padding: .1rem .35rem; }
 .folder-hit span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .folder-hit-name { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .45rem; }
-.folder-hit-name button { min-height: 28px; padding: .15rem .4rem; font-size: .86rem; }
+.folder-hit-name button { min-height: 20px; padding: 0 .25rem; font-size: .86rem; }
 .folder-preview { margin: 0 0 .55rem; padding: .55rem; }
 .folder-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .3rem .75rem; margin-bottom: .4rem; font-size: .87rem; }
 .folder-tree-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(86px, 22%) max-content;

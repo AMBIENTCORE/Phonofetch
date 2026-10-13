@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsData, DownloadStats, FolderPreview, PreviewFile, Quality, RemoteFile, RequestType, SeedKind, SlskdConnectionState, TransferItem } from "../shared/types";
 import { parentDirectory, parseLines } from "../server/matching";
 import { audioDetails, fileFormat } from "./audio-details";
-import { autoFolderPreviews, folderKey } from "./folder-results";
+import { autoFolderPreviews, folderKey, searchHitQueueReason } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import "./compact.css";
 
@@ -451,6 +451,8 @@ function FolderCandidateList({ request, peers, recursive, canInspect, busy, insp
         folderKey(request.id, item.username, item.directory, item.recursive) === key);
       const visibleHits = hits.filter(matches);
       const visibleFiles = preview?.files.filter(matches) ?? [];
+      const previewExpired = preview && Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
+      const showHits = !preview || !visibleFiles.length || previewExpired || Boolean(previewErrors[key]);
       const hitBytes = visibleHits.reduce((total, file) => total + file.size, 0);
       return <div className="folder-candidate" key={key}><div className="candidate">
         <span><strong>{candidate.directory || "Shared files"}</strong><small title={candidate.explanation}>Match {Math.round(candidate.score * 100)}%</small></span>
@@ -459,30 +461,32 @@ function FolderCandidateList({ request, peers, recursive, canInspect, busy, insp
           clearPreviewError(key);
         })}>{inspecting.has(key) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}
       </div>
-      {preview && visibleFiles.length > 0 ? <Preview key={`${preview.id}:${filterKey}`} preview={preview}
+      {preview && visibleFiles.length > 0 && <Preview key={`${preview.id}:${filterKey}`} preview={preview}
         visibleFiles={visibleFiles} filterActive={filterKey !== "all:"} busy={busy} canQueue={canInspect}
         confirmPreview={paths => {
           const count = paths?.length ?? visibleFiles.filter(file => file.eligible).length;
           if (confirm(`Queue ${count} files from ${preview.username}\\${preview.directory}?${preview.excluded_count || count < preview.eligible_count ?
             ` Partial folder: ${preview.excluded_count} quality-excluded and ${preview.eligible_count - count} unselected.` : ""}`))
             void action(() => send(`/requests/${request.id}/queue-folder`, { previewId: preview.id, selectedPaths: paths }));
-        }} /> :
+        }} />}
+      {showHits &&
         <div className="folder-search-hits">
-          <small>Search hits only · {visibleHits.length} file{visibleHits.length === 1 ? "" : "s"} · {bytes(hitBytes)}</small>
+          <small>Search hits{preview ? " (available without inspection)" : " only"} · {visibleHits.length} file{visibleHits.length === 1 ? "" : "s"} · {bytes(hitBytes)}</small>
           {visibleHits.map(file => {
-            const canQueueHit = request.type === "search" && request.status === "review" &&
-              !request.transfers.length && !busy && file.eligible;
+            const queueReason = searchHitQueueReason(request, file);
             return <div className="folder-hit" key={file.id} onContextMenu={event => {
-              if (!canQueueHit) return;
+              if (queueReason || busy) return;
               event.preventDefault();
               queueTrack(file.id);
             }}><span className="folder-hit-name">{basename(file.path)}
-              {canQueueHit && <button className="quiet" onClick={() => queueTrack(file.id)}>Queue file</button>}</span>
+              {queueReason === null ? <button className="quiet" disabled={busy}
+                onClick={() => queueTrack(file.id)}>Queue file</button> :
+                <small className="warn" title={queueReason}>{queueReason}</small>}</span>
             <span className="folder-file-format" title={audioDetails(file.metadata, file.path)}>
               {fileFormat(file.metadata, file.path)}</span><span className="folder-file-size">{bytes(file.size)}</span></div>;
           })}
         </div>}
-      {previewErrors[key] && !preview && <small role="alert" className="warn">Inspection failed: {previewErrors[key]}. Select Inspect to retry.</small>}
+      {previewErrors[key] && <small role="alert" className="warn">Inspection failed: {previewErrors[key]}. Select Inspect to retry.</small>}
       </div>;
     })}</Collapsible>)}</>;
 }
@@ -654,7 +658,7 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, confirmP
       <div className="folder-tree-columns"><span>File</span><span>Type / bitrate</span><span>Size</span></div>
       <FolderTree preview={preview} files={eligible} selected={selected} onSelect={chooseFile}
         onFileMenu={openFileMenu} canQueue={canDownload} />
-    </> : <small>These files are blocked by the old quality rule. Use Show all results.</small>}
+    </> : <small>No selectable files. See the excluded reasons below; for older quality-limited searches, use Show all results above.</small>}
     {excluded.length > 0 && <details className="excluded-results">
       <summary>Excluded ({excluded.length}) · {bytes(preview.audio_bytes - preview.eligible_bytes)}</summary>
       <FolderTree preview={preview} files={excluded} selected={selected} onSelect={chooseFile}

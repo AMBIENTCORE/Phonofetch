@@ -33,10 +33,11 @@ export class Workflow {
     try {
       const all = await this.browseFiles(request, candidate.username, candidate.directory, recursive);
       const bounded = all.filter(file => withinDirectory(file.path, candidate.directory, recursive));
-      if (bounded.length > this.config.MAX_FOLDER_FILES) throw new ApiError(413, "Folder exceeds configured file limit");
       if (!bounded.length) throw new ApiError(404, "Selected directory is empty or inaccessible");
       const audio = bounded.filter(file => /\.(mp3|flac|m4a|ogg|opus|wav|aac)$/i.test(file.path));
       if (!audio.length) throw new ApiError(422, "No supported audio files in this folder");
+      if (audio.length > this.config.MAX_FOLDER_FILES)
+        throw new ApiError(413, `Folder has ${audio.length} audio files; preview limit is ${this.config.MAX_FOLDER_FILES}. Queue an individual search hit or increase MAX_FOLDER_FILES on the NAS.`);
       const files: PreviewFile[] = audio.map(file => ({ ...file, ...qualityCheck(file, request.quality) })).sort((a, b) => a.path.localeCompare(b.path));
       if (!Number.isSafeInteger(files.reduce((total, file) => total + file.size, 0)))
         throw new ApiError(413, "Folder size exceeds a reliable byte count");

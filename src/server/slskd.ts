@@ -51,6 +51,8 @@ export class SlskdShapeError extends Error {
   }
 }
 
+export class SlskdRequestError extends Error {}
+
 export class SlskdAdapter implements SlskdPort {
   private readonly base: string;
   constructor(baseURL: string, private readonly apiKey: string, private readonly timeoutMs: number,
@@ -68,8 +70,8 @@ export class SlskdAdapter implements SlskdPort {
       });
     } catch (error) {
       if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-        throw new Error(`slskd ${method} timed out after ${this.timeoutMs} ms`);
-      throw new Error(`slskd ${method} network error`, { cause: error });
+        throw new SlskdRequestError(`slskd ${method} timed out after ${this.timeoutMs} ms`);
+      throw new SlskdRequestError(`slskd ${method} network error`, { cause: error });
     }
     if (!response.ok) throw new SlskdError(response.status, `${method} ${path.split("?")[0]}`);
     if (response.status === 204) return schema.parse(null);
@@ -83,7 +85,7 @@ export class SlskdAdapter implements SlskdPort {
         const { done, value } = await reader.read();
         if (done) break;
         length += value.byteLength;
-        if (length > 24 * 1024 * 1024) throw new Error("slskd response exceeds 24 MiB safety limit");
+        if (length > 24 * 1024 * 1024) throw new SlskdRequestError("slskd response exceeds 24 MiB safety limit");
         text += decoder.decode(value, { stream: true });
       }
     } finally { reader.releaseLock(); }
@@ -159,7 +161,20 @@ export class SlskdAdapter implements SlskdPort {
     const endpoint = `/api/v0/users/${encodeURIComponent(username)}`;
     const normalizeDirectory = (path: string): string => path.replace(/\\/g, "/").replace(/\/+$/, "");
     const collect = (raw: unknown, operation: string): { files: RemoteFile[]; returnedFiles: number } => {
-      const parsed = z.array(z.unknown()).safeParse(raw);
+      let listed: unknown = raw;
+      if (operation === "GET browse" && !Array.isArray(raw)) {
+        const response = z.object({
+          directories: z.array(z.unknown()),
+          lockedDirectories: z.array(z.unknown()).optional()
+        }).safeParse(raw);
+        if (!response.success) {
+          const issue = response.error.issues[0];
+          throw new SlskdShapeError(operation, issue?.path.map(String).join(".") || "root",
+            issue?.message ?? "invalid browse response");
+        }
+        listed = response.data.directories;
+      }
+      const parsed = z.array(z.unknown()).safeParse(listed);
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
         throw new SlskdShapeError(operation, issue?.path.map(String).join(".") || "root",

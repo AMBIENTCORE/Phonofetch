@@ -5,6 +5,15 @@ export const AUTO_FOLDER_PREVIEW_LIMIT = 5;
 export const folderKey = (requestId: string, username: string, directory: string, recursive: boolean): string =>
   JSON.stringify([requestId, username, directory, recursive]);
 
+export function searchHitQueueReason(request: { type: RequestType; status: RequestStatus; transfers: readonly unknown[] },
+  candidate: Pick<Candidate, "eligible" | "reason">): string | null {
+  if (!candidate.eligible) return candidate.reason;
+  if (request.type !== "search") return "Inspect to download";
+  if (request.transfers.length) return "Already queued; search again";
+  if (request.status !== "review") return "Search not ready";
+  return null;
+}
+
 interface PreviewRequest {
   id: string;
   type: RequestType;

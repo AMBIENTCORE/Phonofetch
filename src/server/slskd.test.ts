@@ -49,13 +49,14 @@ describe("slskd 0.26.1 REST adapter", () => {
         expect(init?.method).toBe("POST");
         expect(JSON.parse(String(init?.body))).toEqual({ directory: "Burial\\Untrue" });
       }
-      return json([
+      const directories = [
         { name: "Burial\\Untrue", fileCount: 2, files: [
           { ...file("Burial\\Untrue\\01 Archangel.mp3"), attributes: [{ type: 0, value: 320 }, { type: 2, value: 0 }] },
           { filename: "Burial\\Untrue\\02 Ghost.flac", size: 1234, sampleRate: 96000, bitDepth: 24 }] },
         { name: "Burial\\Another", files: [file("Burial\\Another\\03 Sibling.mp3")] },
         { name: "Burial\\Untrue\\CD2", files: [file("Burial\\Untrue\\CD2\\04 Nested.mp3")] }
-      ]);
+      ];
+      return json(init?.method === "GET" ? { directories, lockedDirectories: [] } : directories);
     });
 
     const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
@@ -141,10 +142,11 @@ describe("slskd 0.26.1 REST adapter", () => {
     } finally { warn.mockRestore(); }
   });
 
-  it("accepts the full-share directory list when a peer returns a non-list targeted response", async () => {
+  it("accepts slskd's full-share browse object when the targeted response is malformed", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/directory") ?
       json({ name: "Music\\Album", files: [file("Music\\Album\\Song.flac")] }) :
-      json([{ name: "Music\\Album", files: [{ filename: "Song.flac", size: 100 }] }]));
+      json({ directories: [{ name: "Music\\Album", files: [{ filename: "Song.flac", size: 100 }] }],
+        lockedDirectories: [{ name: "Music\\Private", files: [file("Music\\Private\\Hidden.flac")] }] }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
@@ -152,6 +154,14 @@ describe("slskd 0.26.1 REST adapter", () => {
         .toEqual(["Music\\Album\\Song.flac"]);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("root"));
     } finally { warn.mockRestore(); }
+  });
+
+  it("rejects a full-share object without a directory list instead of treating it as an empty folder", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/directory") ?
+      json([]) : json({ error: "No share available" }));
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+    await expect(adapter.browse("alice", "Music\\Album", false))
+      .rejects.toThrow("GET browse returned unexpected response shape at directories");
   });
 
   it("reports a directory response with files that do not match the selected folder", async () => {

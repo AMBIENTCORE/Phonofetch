@@ -9,7 +9,7 @@ import { loadConfig } from "./config";
 import { Store } from "./db";
 import { parentDirectory, unknownMetadata } from "./matching";
 import type { RemoteTransfer, SearchSnapshot, SlskdPort } from "./port";
-import { SlskdShapeError } from "./slskd";
+import { SlskdRequestError, SlskdShapeError } from "./slskd";
 import { Workflow } from "./workflow";
 import { Worker } from "./worker";
 
@@ -83,6 +83,58 @@ const entries = [
 ];
 
 describe("authenticated mixed-batch workflow", () => {
+  it("inspects audio in a folder with more than 250 non-audio extras", async () => {
+    const { app, worker, folderFiles } = setup();
+    folderFiles.push(...Array.from({ length: 260 }, (_, index) =>
+      remote(`alice\\Burial\\Untrue\\cover-${index}.jpg`)));
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial Song", defaultType: "search", mode: "review",
+      entries: [{ original: "Burial Song", queryText: "Burial Song", type: "search",
+        seedKind: "track_seed", quality: "any" }]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const inspected = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(inspected.status).toBe(200);
+    expect(inspected.body).toMatchObject({ eligible_count: 3, excluded_count: 0 });
+    expect(inspected.body.files).toHaveLength(3);
+  });
+
+  it("reports the audio preview limit accurately and still queues an individual search hit", async () => {
+    const { app, worker, store, port, folderFiles } = setup();
+    folderFiles.push(...Array.from({ length: 251 }, (_, index) =>
+      remote(`alice\\Burial\\Untrue\\${index}-extra.flac`)));
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial Song", defaultType: "search", mode: "review",
+      entries: [{ original: "Burial Song", queryText: "Burial Song", type: "search",
+        seedKind: "track_seed", quality: "any" }]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const inspected = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(inspected.status).toBe(413);
+    expect(inspected.body.error).toContain("254 audio files; preview limit is 250");
+    expect(inspected.body.error).not.toContain("upload limit");
+    expect(store.batchDetail(created.body.id)?.requests[0]?.previews).toHaveLength(0);
+    expect((await request(app).post(`/api/requests/${item.id}/select`).set(auth)
+      .send({ candidateId: item.candidates[0].id })).status).toBe(202);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("keeps oversized JSON requests distinct from the folder preview limit", async () => {
+    const { app } = setup();
+    const auth = await login(app);
+    const result = await request(app).post("/api/batches").set(auth)
+      .send({ originalInput: "x".repeat(512 * 1024) });
+    expect(result.status).toBe(413);
+    expect(result.body.error).toBe("Request body exceeds the upload limit");
+  });
+
   it("keeps missing-bitrate MP3 files selectable in an unfiltered manual search", async () => {
     const { app, worker, port, folderFiles, setSnapshot } = setup();
     const auth = await login(app);
@@ -557,6 +609,21 @@ describe("authenticated mixed-batch workflow", () => {
     expect(result.status).toBe(502);
     expect(result.body.error).toContain("directories.0.files.3.size");
     expect(result.body.error).not.toContain("test-api-key");
+  });
+
+  it("shows a safe slskd timeout on the folder instead of a generic inspection error", async () => {
+    const { app, worker, port } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[1]!.original, defaultType: "album_folder", mode: "review", entries: [entries[1]]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    vi.mocked(port.browse).mockRejectedValueOnce(new SlskdRequestError("slskd POST timed out after 45000 ms"));
+    const result = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(result.status).toBe(502);
+    expect(result.body.error).toBe("slskd POST timed out after 45000 ms");
   });
 
   it("never relaxes strict quality and only searches at a different quality after an explicit retry", async () => {

@@ -8,7 +8,7 @@ import type { Config } from "./config";
 import { Store, batchName } from "./db";
 import { normalize, parseLines } from "./matching";
 import type { SlskdPort } from "./port";
-import { SlskdShapeError } from "./slskd";
+import { SlskdError, SlskdRequestError, SlskdShapeError } from "./slskd";
 import { Workflow } from "./workflow";
 
 const uuid = z.uuid();
@@ -224,7 +224,8 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
     next();
   });
   const errors: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
-    if (typeof error === "object" && error !== null && "status" in error && error.status === 413) {
+    if (error instanceof ApiError) { res.status(error.status).json({ error: store.redact(error.message) }); return; }
+    if (typeof error === "object" && error !== null && "type" in error && error.type === "entity.too.large") {
       res.status(413).json({ error: "Request body exceeds the upload limit" });
       return;
     }
@@ -232,8 +233,7 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
       res.status(400).json({ error: `Invalid request: ${error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ")}` });
       return;
     }
-    if (error instanceof ApiError) { res.status(error.status).json({ error: store.redact(error.message) }); return; }
-    if (error instanceof SlskdShapeError) {
+    if (error instanceof SlskdError || error instanceof SlskdRequestError || error instanceof SlskdShapeError) {
       store.event("error", "api", "request_failed", error.message);
       res.status(502).json({ error: store.redact(error.message) });
       return;
