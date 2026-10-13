@@ -80,3 +80,7 @@ docker compose --env-file /volume2/docker/Phonofetch/.env \
 Verify the tunnel is Healthy, Cloudflare Access prompts before Phonofetch's own login, and the app works from outside your LAN before linking or redirecting your homepage. Future Phonofetch updates do not recreate the separate tunnel connector.
 
 To use `https://www.ambientcore.dev/phonofetch/` as an entry link after verification, create a Cloudflare **Single Redirect** matching only the `www` hostname and paths `/phonofetch` or `/phonofetch/`, with a 302 target of `https://phonofetch.ambientcore.dev/`. This keeps the homepage intact; the browser's final URL is the subdomain. Add the homepage link once in the separate homepage source. Subsequent Phonofetch image updates need no website deployment.
+
+## iOS home screen and sharing
+
+Open `https://phonofetch.ambientcore.dev/` in Safari, sign in privately, then use **Share → Add to Home Screen**. The app supplies a 180×180 `apple-touch-icon.png` derived from the same artwork as the homepage's Phonofetch preview. Its Open Graph image is hosted publicly at `https://www.ambientcore.dev/phonofetch-og.png`; Cloudflare Access can still prevent anonymous social-media crawlers from reading the private app's metadata.
