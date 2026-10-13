@@ -287,7 +287,6 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
 .service-warning button { min-height: 32px; margin: .25rem 0 0 .5rem; padding: .25rem .5rem; }
 
 :root .shell header { border-bottom: 1px solid #584b72; }
-:root .brand { text-shadow: 0 0 14px #4ce9dc55; }
 :root :is(button:not(.quiet):not(.secondary), .button) { border-color: #729ca9; box-shadow: inset 0 1px 0 #8ef1ea33; }
 :root :is(button:hover, .button:hover, input:focus-visible, textarea:focus-visible, select:focus-visible) { border-color: #8ef1ea; }
 :root :is(nav a.current, nav a:hover, .filter-presets button.current) { background: #293845; color: #d2fff5; }

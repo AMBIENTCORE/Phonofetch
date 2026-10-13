@@ -243,7 +243,7 @@ function NewBatch({ action, busy, initialInput }: {
       });
       location.hash = `#/search/${result.id}`;
     }); }}>
-      <label>Searches<textarea rows={4} maxLength={32768} value={input} placeholder={"ben klock subzero\nburial archangel"} onChange={event => setInput(event.target.value)} /></label>
+      <label>Searches<textarea rows={4} maxLength={32768} value={input} onChange={event => setInput(event.target.value)} /></label>
       <label className="upload">Text file (.txt)<input type="file" accept=".txt,text/plain" onChange={event => { const file = event.target.files?.[0]; if (!file) return;
         if (file.size > 32768 || !file.name.toLowerCase().endsWith(".txt")) { setFileError("Use a .txt file up to 32 KiB."); return; }
         void file.text().then(text => { setInput(current => [current, text].filter(Boolean).join("\n")); setFileError(""); }).catch(() => setFileError("Could not read the file."));

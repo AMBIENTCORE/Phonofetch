@@ -84,4 +84,4 @@ To use `https://www.ambientcore.dev/phonofetch/` as an entry link after verifica
 
 ## iOS home screen and sharing
 
-Open `https://phonofetch.ambientcore.dev/` in Safari, sign in privately, then use **Share → Add to Home Screen**. The app supplies a 180×180 `apple-touch-icon.png` derived from the same artwork as the homepage's Phonofetch preview. Its Open Graph image is hosted publicly at `https://www.ambientcore.dev/phonofetch-og.png`; Cloudflare Access can still prevent anonymous social-media crawlers from reading the private app's metadata.
+Open `https://phonofetch.ambientcore.dev/` in Safari, sign in privately, then use **Share → Add to Home Screen**. The app supplies a 180×180 `apple-touch-icon.png` matching its `phonofetch-mark.svg` browser icon, plus PNG and ICO favicon fallbacks. If an existing home-screen shortcut still shows the old image, remove and add it again after updating. The separate Open Graph artwork is hosted publicly at `https://www.ambientcore.dev/phonofetch-og.png`; Cloudflare Access can still prevent anonymous social-media crawlers from reading the private app's metadata.
