@@ -1,35 +1,23 @@
 # Phonofetch
 
-**Find it on your phone. Download it on your NAS.**
+![Iridescent Phonofetch artwork](./docs/phonofetch-banner.png)
 
-Phonofetch is a web interface for your **existing slskd** instance. Search Soulseek, look inside a peer's folder, and pick exactly what you want. The transfers keep running on your server after you close the page.
+Phonofetch is a self-hosted Soulseek search and download interface for an **existing slskd** instance. Search across peers, inspect folders, choose files and follow transfers from a desktop or phone. slskd and your downloads stay on your server.
 
-![Phonofetch search results with folders, file filters and download controls](./docs/search-results-demo.png)
+## Screenshots
 
-*Screenshots use made-up music, peers and transfers.*
+**Search:** inspect a folder before downloading, or filter the results to find specific files.
 
-## Why Phonofetch?
+![Phonofetch search results for Forest Drive West's Recursion EP](./docs/search-results-demo.png)
 
-- **Browse before you queue.** Search across peers, filter results, and inspect the rest of a folder.
-- **Pick the actual files.** Grab one track, a handful of files, or the whole folder, including covers, playlists and NFOs. Automatic track or album downloading is opt-in.
-- **Keep tabs on downloads.** See progress, retry failed files and revisit past searches without sitting at your desktop.
-- **Keep it yours.** slskd, downloads and Phonofetch's SQLite database stay on your own machine.
+**Downloads:** see transfers by peer and folder, with per-file status and controls.
 
-## A quick look
+![Phonofetch downloads showing Forest Drive West and Ex-Terrestrial](./docs/downloads-demo.png)
 
-The **Dashboard** puts a new search, recent downloads and activity in one place.
-
-![Phonofetch desktop dashboard with new search and recent downloads](./docs/dashboard-demo.png)
-
-**Downloads** groups transfers by peer and folder, with progress and per-file controls.
-
-![Phonofetch desktop downloads view with transfer progress](./docs/downloads-demo.png)
-
-The same workflow fits a phone: start from the dashboard, then inspect folders and select files in Search.
-
+**Mobile:** the same Search and Downloads views at phone width, recreated with the music shown in the desktop screenshots.
 <p>
-  <a href="./docs/mobile-dashboard-demo.png"><img src="./docs/mobile-dashboard-demo.png" width="280" alt="Phonofetch mobile dashboard with search and recent downloads"></a>
-  <a href="./docs/mobile-search-demo.png"><img src="./docs/mobile-search-demo.png" width="280" alt="Phonofetch mobile search results with selectable files and folders"></a>
+  <a href="./docs/mobile-search-demo.png"><img src="./docs/mobile-search-demo.png" width="280" alt="Mobile search results for Forest Drive West with MP3 and FLAC folders"></a>
+  <a href="./docs/mobile-downloads-demo.png"><img src="./docs/mobile-downloads-demo.png" width="280" alt="Mobile downloads showing completed Forest Drive West and Ex-Terrestrial tracks"></a>
 </p>
 
 ## Deploy
@@ -86,6 +74,6 @@ The tunnel needs no router port forward. To use a path on a separate homepage, r
 ## Good to know
 
 - Manual selection accepts any valid-size file, even non-audio extras; the FLAC/MP3 filters change what you *see*. Strict audio quality rules apply only to optional automatic downloads. Folder selection is bounded by `MAX_FOLDER_FILES` and `MAX_FOLDER_BYTES` in `.env`.
-- On iPhone, open the HTTPS app in Safari, sign in, then use **Share → Add to Home Screen**. If an older shortcut still shows the previous icon, remove it and add it again.
+- On iPhone, open the HTTPS app in Safari, sign in, then use **Share → Add to Home Screen**.
 
-Made by [AMBIENTCORE](https://github.com/AMBIENTCORE). [MIT licensed](./LICENSE). Found a bug or have an idea? [Open an issue](https://github.com/AMBIENTCORE/Phonofetch/issues).
+[AMBIENTCORE](https://github.com/AMBIENTCORE) · [MIT License](./LICENSE) · [Issues](https://github.com/AMBIENTCORE/Phonofetch/issues)
