@@ -14,7 +14,7 @@ Phonofetch is a self-hosted Soulseek search and download interface for an **exis
 
 ![Phonofetch downloads showing Forest Drive West and Ex-Terrestrial](./docs/downloads-demo.png)
 
-**Mobile:** the same Search and Downloads views at phone width, recreated with the music shown in the desktop screenshots.
+**Mobile:** folder drill-down, file selection and bottom navigation. These phone-width views use the music shown in the desktop screenshots.
 <p>
   <a href="./docs/mobile-search-demo.png"><img src="./docs/mobile-search-demo.png" width="280" alt="Mobile search results for Forest Drive West with MP3 and FLAC folders"></a>
   <a href="./docs/mobile-downloads-demo.png"><img src="./docs/mobile-downloads-demo.png" width="280" alt="Mobile downloads showing completed Forest Drive West and Ex-Terrestrial tracks"></a>

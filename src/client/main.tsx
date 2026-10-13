@@ -59,6 +59,28 @@ function useDisclosureGroup(version: string) {
   return { root, allOpen, toggle };
 }
 
+function useMobileLayout(): boolean {
+  const [mobile, setMobile] = useState(() => matchMedia("(max-width: 650px)").matches);
+  useEffect(() => {
+    const query = matchMedia("(max-width: 650px)");
+    const update = () => setMobile(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return mobile;
+}
+
+function NavIcon({ name }: { name: "dashboard" | "search" | "downloads" | "activity" }): React.ReactElement {
+  return <svg className="tab-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    {name === "dashboard" ? <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></> :
+      name === "search" ? <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></> :
+        name === "downloads" ? <><path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" /></> :
+          <><path d="M5 4h14v16H5zM9 9h6M9 13h6M9 17h4" /></>}
+  </svg>;
+}
+
 function App(): React.ReactElement {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [username, setUsername] = useState("");
@@ -108,10 +130,13 @@ function App(): React.ReactElement {
   const searchPage = page === "#/new" || page.startsWith("#/new?");
   return <div className="shell">
     <header><a className="brand" href="#/"><img className="brand-symbol" src="/phonofetch-mark.svg" alt="" /> Phonofetch</a><nav aria-label="Main navigation">
-      <a className={page === "#/" ? "current" : ""} href="#/">Dashboard</a>
-      <a className={searchPage ? "current" : ""} href="#/new">Search</a>
-      <a className={page === "#/downloads" ? "current" : ""} href="#/downloads">Downloads</a>
-      <a className={page === "#/activity" ? "current" : ""} href="#/activity">Activity Log</a>
+      <a className={page === "#/" ? "current" : ""} href="#/"><NavIcon name="dashboard" /><span>Dashboard</span></a>
+      <a className={searchPage ? "current" : searchPath ? "mobile-current" : ""} href="#/new">
+        <NavIcon name="search" /><span>Search</span></a>
+      <a className={page === "#/downloads" ? "current" : ""} href="#/downloads"><NavIcon name="downloads" /><span>Downloads</span></a>
+      <a className={page === "#/activity" ? "current" : ""} href="#/activity">
+        <NavIcon name="activity" /><span className="desktop-activity-label">Activity Log</span>
+        <span className="mobile-activity-label">Activity</span></a>
     </nav><button className="quiet" onClick={() => void action(async () => { await send("/logout"); csrf = ""; setAuthenticated(false); })}>Sign out</button></header>
     <main><div className="global-error" role="alert">{error}</div>
       {searchPage ? <NewBatch key={page} initialInput={searchDraftQuery(page)} action={action} busy={busy} /> :
@@ -184,10 +209,21 @@ function Dashboard({ reload }: { reload: number }): React.ReactElement {
 function DownloadsPage({ reload, action, busy }: {
   reload: number; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
 }): React.ReactElement {
+  const mobile = useMobileLayout();
   const [data, setData] = useState<DownloadsData>();
   const [error, setError] = useState("");
   const [activeLimit, setActiveLimit] = useState(50);
   const [finishedLimit, setFinishedLimit] = useState(50);
+  const [mobileView, setMobileView] = useState<"active" | "finished" | null>(null);
+  const selectedView = mobileView ?? (data?.active_total === 0 && data.finished_total > 0 ? "finished" : "active");
+  const clearFinished = () => {
+    if (confirm("Hide completed, failed and cancelled downloads from the list? Files and statistics are kept."))
+      void action(async () => { await send("/downloads/clear"); setFinishedLimit(50); });
+  };
+  const clearStats = () => {
+    if (confirm("Reset completed-file and downloaded-byte statistics? Download entries are kept."))
+      void action(() => send("/downloads/stats/clear"));
+  };
   useEffect(() => {
     api<DownloadsData>(`/downloads?activeLimit=${activeLimit}&finishedLimit=${finishedLimit}`)
       .then(setData).catch(err => setError(String(err)));
@@ -196,27 +232,33 @@ function DownloadsPage({ reload, action, busy }: {
     <p role="alert">{error}</p>
     <DownloadMetrics stats={data?.stats} />
     <div className="download-controls">
-      <button className="secondary" disabled={busy || !data?.finished_total} onClick={() => {
-        if (confirm("Hide completed, failed and cancelled downloads from the list? Files and statistics are kept."))
-          void action(async () => { await send("/downloads/clear"); setFinishedLimit(50); });
-      }}>Clear finished list</button>
-      <button className="secondary" disabled={busy} onClick={() => {
-        if (confirm("Reset completed-file and downloaded-byte statistics? Download entries are kept."))
-          void action(() => send("/downloads/stats/clear"));
-      }}>Clear statistics</button>
+      <button className="secondary" disabled={busy || !data?.finished_total} onClick={clearFinished}>Clear finished list</button>
+      <button className="secondary" disabled={busy} onClick={clearStats}>Clear statistics</button>
     </div>
-    <section className="panel"><div className="panel-heading"><h2>Ongoing / needs attention</h2>
+    <div className="mobile-download-tabs" role="group" aria-label="Download status">
+      <button type="button" className={selectedView === "active" ? "current" : ""} aria-pressed={selectedView === "active"}
+        onClick={() => setMobileView("active")}>Active <span>{data?.active_total ?? 0}</span></button>
+      <button type="button" className={selectedView === "finished" ? "current" : ""} aria-pressed={selectedView === "finished"}
+        onClick={() => setMobileView("finished")}>Finished <span>{data?.finished_total ?? 0}</span></button>
+    </div>
+    <section className={`panel download-section${selectedView === "active" ? " mobile-selected" : ""}`}>
+      <div className="panel-heading"><h2>Ongoing / needs attention</h2>
       <small>{data?.active_total ?? 0} transfers{data?.stats.uncertain_count ? ` · ${data.stats.uncertain_count} uncertain` : ""}</small></div>
       {!data?.active.length ? <p className="empty">No ongoing downloads.</p> :
         <DownloadTree items={data.active} action={action} busy={busy} expandFolders />}
       {data && data.active_total > data.active.length && <button className="secondary" onClick={() => setActiveLimit(limit => limit + 50)}>Load more ongoing</button>}
     </section>
-    <section className="panel"><div className="panel-heading"><h2>Finished</h2>
+    <section className={`panel download-section${selectedView === "finished" ? " mobile-selected" : ""}`}>
+      <div className="panel-heading"><h2>Finished</h2>
       <small>{data?.finished_total ?? 0} in list</small></div>
       {!data?.finished.length ? <p className="empty">No finished downloads in the list.</p> :
-        <DownloadTree items={data.finished} action={action} busy={busy} expandFolders={false} />}
+        <DownloadTree items={data.finished} action={action} busy={busy} expandFolders={mobile && data.finished.length <= 10} />}
       {data && data.finished_total > data.finished.length && <button className="secondary" onClick={() => setFinishedLimit(limit => limit + 50)}>Load more finished</button>}
-    </section></>;
+    </section>
+    <details className="mobile-download-options"><summary>Manage downloads</summary>
+      <button className="secondary" disabled={busy || !data?.finished_total} onClick={clearFinished}>Clear finished list</button>
+      <button className="secondary" disabled={busy} onClick={clearStats}>Clear statistics</button>
+    </details></>;
 }
 
 function NewBatch({ action, busy, initialInput }: {
@@ -331,6 +373,7 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   const [filterText, setFilterText] = useState("");
   const [selectedHits, setSelectedHits] = useState<Set<string>>(new Set());
   const [selectedPreviews, setSelectedPreviews] = useState<Map<string, Set<string>>>(new Map());
+  const mobile = useMobileLayout();
   const parsedFilter = parseResultFilter(filterText);
   const matches = (file: Pick<RemoteFile, "path" | "size" | "metadata">): boolean =>
     parsedFilter.value !== null && matchesResult(file, preset, parsedFilter.value);
@@ -445,13 +488,13 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
           canSelect={false} selected={selectedHits} onSelect={chooseHit} />
       </details>}
       </div></div>}
-    {(request.type === "album_folder" || request.type === "search") && request.candidates.length > 0 && <div>
+    {(request.type === "album_folder" || request.type === "search") && request.candidates.length > 0 && <div className="request-folder-results">
       <div className="result-section-heading"><h3>Folders ({matchingCount + otherCount})</h3>
         {matchingCount + otherCount > 0 && <button className="secondary" type="button" onClick={folderDisclosures.toggle}>
           {folderDisclosures.allOpen ? "Collapse all" : "Expand all"}</button>}</div>
       <label className="check"><input type="checkbox" checked={recursive} onChange={event => setRecursive(event.target.checked)} /> Include subfolders</label>
       <div ref={folderDisclosures.root}>
-      {matchingCount > 0 ? <FolderCandidateList request={request} peers={matchingFolders} recursive={recursive}
+      {matchingCount > 0 ? <FolderCandidateList request={request} peers={matchingFolders} recursive={recursive} mobile={mobile}
         canInspect={canInspect} busy={busy} inspecting={inspecting} previewErrors={previewErrors}
         clearPreviewError={clearPreviewError} action={action} selectedHits={selectedHits} onSelectHit={chooseHit}
         previewSelections={selectedPreviews} onPreviewSelectionChange={choosePreviewFiles}
@@ -459,7 +502,7 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
         <p>{parsedFilter.error ? "Fix the filter above to see results." : "No folders match this filter. Select All to see every result."}</p>}
       {otherCount > 0 && <details className="excluded-results">
         <summary>Other folders ({otherCount})</summary>
-        <FolderCandidateList request={request} peers={otherFolders} recursive={recursive}
+        <FolderCandidateList request={request} peers={otherFolders} recursive={recursive} mobile={mobile}
           canInspect={canInspect} busy={busy} inspecting={inspecting} previewErrors={previewErrors}
           clearPreviewError={clearPreviewError} action={action} selectedHits={selectedHits} onSelectHit={chooseHit}
           previewSelections={selectedPreviews} onPreviewSelectionChange={choosePreviewFiles}
@@ -476,9 +519,8 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   </section>;
 }
 
-function FolderCandidateList({ request, peers, recursive, canInspect, busy, inspecting, previewErrors, clearPreviewError,
-  action, selectedHits, onSelectHit, previewSelections, onPreviewSelectionChange, matches, filterKey }: {
-  request: RequestDetail; peers: Map<string, Array<[string, Candidate[]]>>; recursive: boolean;
+type FolderListProps = {
+  request: RequestDetail; peers: Map<string, Array<[string, Candidate[]]>>; recursive: boolean; mobile: boolean;
   canInspect: boolean; busy: boolean; inspecting: ReadonlySet<string>;
   previewErrors: Record<string, string>; clearPreviewError: (key: string) => void;
   action: (fn: () => Promise<unknown>) => Promise<void>;
@@ -486,24 +528,62 @@ function FolderCandidateList({ request, peers, recursive, canInspect, busy, insp
   previewSelections: ReadonlyMap<string, ReadonlySet<string>>;
   onPreviewSelectionChange: (previewId: string, paths: Set<string>) => void;
   matches: (file: Pick<RemoteFile, "path" | "size" | "metadata">) => boolean; filterKey: string;
-}): React.ReactElement {
-  return <>{[...peers].sort((a, b) => peerOrder(a[1][0]?.[1][0], b[1][0]?.[1][0])).map(([username, folders]) => <Collapsible className="peer-group" initiallyOpen key={username}>
-    <summary>{username}{folders.length > 1 ? ` (${folders.length})` : ""} · {peerDetails(folders[0]?.[1][0])}</summary>{folders.map(([key, hits]) => {
+};
+
+function FolderCandidateList({ peers, mobile, ...body }: FolderListProps): React.ReactElement {
+  const sorted = [...peers].sort((a, b) => peerOrder(a[1][0]?.[1][0], b[1][0]?.[1][0]));
+  if (mobile) return <div className="mobile-folder-list">{sorted.flatMap(([, folders]) =>
+    folders.map(([key, hits]) => {
       const candidate = hits[0]!;
-      const preview = request.previews.find(item =>
-        folderKey(request.id, item.username, item.directory, item.recursive) === key);
-      const visibleHits = hits.filter(matches);
-      const visibleFiles = preview?.files.filter(matches) ?? [];
-      const previewExpired = preview && Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
-      const shownHits = !preview || !visibleFiles.length || previewExpired || previewErrors[key] ?
-        visibleHits : searchHitsOutsidePreview(visibleHits, preview, selectedHits);
-      const hitBytes = shownHits.reduce((total, file) => total + file.size, 0);
-      return <div className="folder-candidate" key={key}><div className="candidate">
+      const preview = body.request.previews.find(item =>
+        folderKey(body.request.id, item.username, item.directory, item.recursive) === key);
+      const files = preview?.files ?? hits;
+      return <details className="mobile-folder-card" key={key} onToggle={event => {
+        if (event.currentTarget.open && event.currentTarget === event.target)
+          event.currentTarget.scrollIntoView({ block: "start" });
+      }}>
+        <summary>
+          <span className="mobile-folder-back">← All folders</span>
+          <strong title={candidate.directory}>{basename(candidate.directory) || "Shared files"}</strong>
+          <span className="mobile-folder-peer">{candidate.username} · {peerDetails(candidate)}</span>
+          <span className="mobile-folder-meta">{files.length} file{files.length === 1 ? "" : "s"} ·
+            {" "}{bytes(files.reduce((sum, file) => sum + file.size, 0))} ·
+            {" "}{Math.round(candidate.score * 100)}% match</span>
+        </summary>
+        <div className="mobile-folder-detail">
+          {candidate.directory && <details className="mobile-folder-path"><summary>Full path</summary>
+            <small>{candidate.directory}</small></details>}
+          <FolderCandidateBody {...body} candidate={candidate} hits={hits} folderId={key} />
+        </div>
+      </details>;
+    }))}</div>;
+  return <>{sorted.map(([username, folders]) => <Collapsible className="peer-group" initiallyOpen key={username}>
+    <summary>{username}{folders.length > 1 ? ` (${folders.length})` : ""} · {peerDetails(folders[0]?.[1][0])}</summary>
+    {folders.map(([key, hits]) => <div className="folder-candidate" key={key}>
+      <FolderCandidateBody {...body} candidate={hits[0]!} hits={hits} folderId={key} />
+    </div>)}
+  </Collapsible>)}</>;
+}
+
+function FolderCandidateBody({ request, candidate, hits, folderId, recursive, canInspect, busy, inspecting,
+  previewErrors, clearPreviewError, action, selectedHits, onSelectHit, previewSelections,
+  onPreviewSelectionChange, matches, filterKey }: Omit<FolderListProps, "peers" | "mobile"> & {
+  candidate: Candidate; hits: Candidate[]; folderId: string;
+}): React.ReactElement {
+  const preview = request.previews.find(item =>
+    folderKey(request.id, item.username, item.directory, item.recursive) === folderId);
+  const visibleHits = hits.filter(matches);
+  const visibleFiles = preview?.files.filter(matches) ?? [];
+  const previewExpired = preview && Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
+  const shownHits = !preview || !visibleFiles.length || previewExpired || previewErrors[folderId] ?
+    visibleHits : searchHitsOutsidePreview(visibleHits, preview, selectedHits);
+  const hitBytes = shownHits.reduce((total, file) => total + file.size, 0);
+  return <><div className="candidate">
         <span><strong>{candidate.directory || "Shared files"}</strong><small title={candidate.explanation}>Match {Math.round(candidate.score * 100)}%</small></span>
-        {canInspect && candidate.directory && <button className="quiet" disabled={busy || inspecting.has(key)} onClick={() => void action(async () => {
+        {canInspect && candidate.directory && <button className="quiet" disabled={busy || inspecting.has(folderId)} onClick={() => void action(async () => {
           await send<FolderPreview>(`/requests/${request.id}/preview`, { candidateId: candidate.id, recursive });
-          clearPreviewError(key);
-        })}>{inspecting.has(key) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}
+          clearPreviewError(folderId);
+        })}>{inspecting.has(folderId) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}
       </div>
       {preview && visibleFiles.length > 0 && <Preview key={preview.id} preview={preview}
         visibleFiles={visibleFiles} filterActive={filterKey !== "all:"} busy={busy} canQueue={canInspect}
@@ -532,9 +612,8 @@ function FolderCandidateList({ request, peers, recursive, canInspect, busy, insp
               {fileFormat(file.metadata, file.path)}</span><span className="folder-file-size">{bytes(file.size)}</span></div>;
           })}
         </div>}
-      {previewErrors[key] && <small role="alert" className="warn">Inspection failed: {previewErrors[key]}. Select Inspect to retry.</small>}
-      </div>;
-    })}</Collapsible>)}</>;
+      {previewErrors[folderId] && <small role="alert" className="warn">Inspection failed: {previewErrors[folderId]}. Select Inspect to retry.</small>}
+    </>;
 }
 
 function peerOrder(a?: Candidate, b?: Candidate): number {
@@ -706,7 +785,10 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, selected
         onFileMenu={openFileMenu} canQueue={false} />
     </details>}
     {expired && <small className="warn">Preview expired. Refresh this folder before downloading.</small>}
-    {canQueue && <div className="folder-actions">
+    {canQueue && <div className={`folder-actions${selectedFiles.length ? " has-selection" : ""}`}>
+      <span className="mobile-selection-summary" aria-live="polite">{selectedFiles.length
+        ? `${selectedFiles.length} selected · ${bytes(selectedBytes)}`
+        : `${eligible.length} available · ${bytes(visibleFiles.reduce((sum, file) => sum + file.size, 0))}`}</span>
       {selected.size > 0 && <button className="secondary" disabled={!canDownload}
         onClick={() => onSelectionChange(new Set())}>Clear selection</button>}
       <button disabled={!canDownload || (selected.size > 0 ? !selectedFiles.length : !eligible.length)}
@@ -751,8 +833,10 @@ function DownloadTree({ items, action, busy, expandFolders }: { items: DownloadI
     return <Collapsible className="download-peer" initiallyOpen key={username}>
       <summary><strong>{username}</strong><small>{peerFiles.length} file{peerFiles.length === 1 ? "" : "s"} · {bytes(peerFiles.reduce((sum, file) => sum + file.size, 0))}</small></summary>
       {[...folders].map(([directory, files]) => <Collapsible className="download-folder" initiallyOpen={expandFolders} key={directory}>
-        <summary><strong title={directory}>{directory || "Shared files"}</strong>
+        <summary><strong className="download-directory-desktop" title={directory}>{directory || "Shared files"}</strong>
+          <strong className="download-directory-mobile" title={directory}>{basename(directory) || "Shared files"}</strong>
           <small>{files.length} file{files.length === 1 ? "" : "s"} · {bytes(files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
+        <small className="download-directory-path">{directory}</small>
         {files.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy} />)}
       </Collapsible>)}
     </Collapsible>;
@@ -824,13 +908,23 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
       setEvents(existing => [...existing, ...items]); setOlder(items.length === 40);
     } catch (err) { setError(String(err)); }
   }
+  const exportEvents = () => {
+    const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "phonofetch-activity.json";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
   return <><div className="page-title"><div><h1>Activity Log</h1>
     <p>Persistent events · Europe/Lisbon time</p></div>
-    <button className="secondary" onClick={() => { const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json" });
-      const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "phonofetch-activity.json"; link.click(); URL.revokeObjectURL(link.href); }}>Export loaded events</button></div>
+    <button className="secondary desktop-activity-export" onClick={exportEvents}>Export loaded events</button></div>
     <section className="panel activity-panel"><div className="panel-heading"><div><h2>Events</h2><small>Stored on your NAS</small></div>
       <button className="secondary filter-toggle" aria-controls="activity-filters" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(open => !open)}>
         Filters{activeFilters ? ` (${activeFilters})` : ""} <span aria-hidden="true">{filtersOpen ? "−" : "+"}</span></button></div>
+      <details className="mobile-activity-options"><summary>More options</summary>
+        <button className="secondary" onClick={exportEvents}>Export loaded events</button>
+      </details>
       {filtersOpen && <div className="filters" id="activity-filters"><label>Severity<select value={severity} onChange={event => setSeverity(event.target.value)}>
       <option value="">All</option>{["info", "success", "warning", "error"].map(value => <option key={value}>{value}</option>)}</select></label>
       <label>Category<input placeholder="e.g. search" value={category} onChange={event => setCategory(event.target.value)} /></label>
