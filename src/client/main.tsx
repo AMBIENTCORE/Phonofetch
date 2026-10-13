@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsData, DownloadStats, FolderPreview, PreviewFile, Quality, RemoteFile, RequestType, SeedKind, SlskdConnectionState, TransferItem } from "../shared/types";
-import { parseLines } from "../server/matching";
+import { parentDirectory, parseLines } from "../server/matching";
 import { audioDetails, fileFormat } from "./audio-details";
 import { autoFolderPreviews, folderKey } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
@@ -157,13 +157,13 @@ function DownloadsPage({ reload, action, busy }: {
     <section className="panel"><div className="panel-heading"><h2>Ongoing / needs attention</h2>
       <small>{data?.active_total ?? 0} transfers{data?.stats.uncertain_count ? ` · ${data.stats.uncertain_count} uncertain` : ""}</small></div>
       {!data?.active.length ? <p className="empty">No ongoing downloads.</p> :
-        data.active.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy} />)}
+        <DownloadTree items={data.active} action={action} busy={busy} expandFolders />}
       {data && data.active_total > data.active.length && <button className="secondary" onClick={() => setActiveLimit(limit => limit + 50)}>Load more ongoing</button>}
     </section>
     <section className="panel"><div className="panel-heading"><h2>Finished</h2>
       <small>{data?.finished_total ?? 0} in list</small></div>
       {!data?.finished.length ? <p className="empty">No finished downloads in the list.</p> :
-        data.finished.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy} />)}
+        <DownloadTree items={data.finished} action={action} busy={busy} expandFolders={false} />}
       {data && data.finished_total > data.finished.length && <button className="secondary" onClick={() => setFinishedLimit(limit => limit + 50)}>Load more finished</button>}
     </section></>;
 }
@@ -642,6 +642,31 @@ function TransferActions({ transfer, action, busy }: { transfer: TransferItem;
     }}>Retry file</button>}</>;
 }
 
+function DownloadTree({ items, action, busy, expandFolders }: { items: DownloadItem[];
+  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean; expandFolders: boolean;
+}): React.ReactElement {
+  const peers = new Map<string, Map<string, DownloadItem[]>>();
+  for (const item of items) {
+    let folders = peers.get(item.username);
+    if (!folders) { folders = new Map(); peers.set(item.username, folders); }
+    const directory = parentDirectory(item.path);
+    const files = folders.get(directory) ?? [];
+    files.push(item);
+    folders.set(directory, files);
+  }
+  return <div className="download-tree">{[...peers].map(([username, folders]) => {
+    const peerFiles = [...folders.values()].flat();
+    return <details className="download-peer" open key={username}>
+      <summary><strong>{username}</strong><small>{peerFiles.length} file{peerFiles.length === 1 ? "" : "s"} · {bytes(peerFiles.reduce((sum, file) => sum + file.size, 0))}</small></summary>
+      {[...folders].map(([directory, files]) => <details className="download-folder" open={expandFolders} key={directory}>
+        <summary><strong title={directory}>{directory || "Shared files"}</strong>
+          <small>{files.length} file{files.length === 1 ? "" : "s"} · {bytes(files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
+        {files.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy} />)}
+      </details>)}
+    </details>;
+  })}</div>;
+}
+
 function DownloadRow({ item, action, busy }: { item: DownloadItem;
   action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
   const progress = item.status === "completed" ? 100 : Math.max(0, Math.min(100, item.progress));
@@ -650,7 +675,7 @@ function DownloadRow({ item, action, busy }: { item: DownloadItem;
   return <div className="download-row">
     <div className="download-file"><strong title={item.path}>{basename(item.path)}</strong>
       <small title={item.query_text}><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>
-        Search #{item.batch_number} · {item.query_text}</a> · {item.username}</small>
+        Search #{item.batch_number}</a></small>
       {item.error && <small className="warn">{item.error}</small>}</div>
     <div className={`download-bar ${item.status}`} role="progressbar" aria-valuemin={0} aria-valuemax={100}
       aria-valuenow={progress} aria-label={`${basename(item.path)}: ${label}`}>
