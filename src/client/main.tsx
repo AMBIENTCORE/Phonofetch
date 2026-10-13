@@ -7,7 +7,6 @@ import { audioDetails, fileFormat } from "./audio-details";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import { searchDraftHash, searchDraftQuery } from "./search-navigation";
-import { isSkin, SKIN_STORAGE_KEY, type Skin } from "./skin";
 import "./compact.css";
 
 let csrf = "";
@@ -60,28 +59,6 @@ function useDisclosureGroup(version: string) {
   return { root, allOpen, toggle };
 }
 
-function savedSkin(): Skin {
-  try {
-    const value = localStorage.getItem(SKIN_STORAGE_KEY);
-    if (isSkin(value)) return value;
-    if (value !== null) console.warn("Ignoring an unrecognized Phonofetch skin preference");
-  } catch (error) { console.warn("Could not read the Phonofetch skin preference", error); }
-  return "original";
-}
-
-function SkinPicker({ skin, onChange }: { skin: Skin; onChange: (value: Skin) => void }): React.ReactElement {
-  return <label className="skin-picker"><span>Skin</span>
-    <select aria-label="App skin" value={skin} onChange={event => {
-      if (isSkin(event.target.value)) onChange(event.target.value);
-      else console.error("Unknown Phonofetch skin selection");
-    }}>
-      <option value="original">Original</option>
-      <option value="accents">Iridescent accents</option>
-      <option value="liquid">Liquid chrome</option>
-    </select>
-  </label>;
-}
-
 function App(): React.ReactElement {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [username, setUsername] = useState("");
@@ -90,12 +67,6 @@ function App(): React.ReactElement {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
-  const [skin, setSkin] = useState<Skin>(savedSkin);
-  useEffect(() => {
-    document.documentElement.dataset.skin = skin;
-    try { localStorage.setItem(SKIN_STORAGE_KEY, skin); }
-    catch (error) { console.warn("Could not save the Phonofetch skin preference", error); }
-  }, [skin]);
   useEffect(() => {
     api<{ authenticated: boolean; csrf?: string }>("/session").then(session => {
       csrf = session.csrf ?? "";
@@ -130,7 +101,7 @@ function App(): React.ReactElement {
         <label>Username<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} required /></label>
         <label>Password<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required /></label>
         <button disabled={busy}>Sign in</button>
-      </form><SkinPicker skin={skin} onChange={setSkin} /><p role="alert">{error}</p>
+      </form><p role="alert">{error}</p>
     </div></main>;
   const searchPath = page.startsWith("#/search/") ? "#/search/" : page.startsWith("#/batch/") ? "#/batch/" : null;
   const batchId = searchPath ? page.slice(searchPath.length).split("?")[0] : null;
@@ -141,8 +112,7 @@ function App(): React.ReactElement {
       <a className={searchPage ? "current" : ""} href="#/new">Search</a>
       <a className={page === "#/downloads" ? "current" : ""} href="#/downloads">Downloads</a>
       <a className={page === "#/activity" ? "current" : ""} href="#/activity">Activity Log</a>
-    </nav><div className="header-actions"><SkinPicker skin={skin} onChange={setSkin} />
-      <button className="quiet" onClick={() => void action(async () => { await send("/logout"); csrf = ""; setAuthenticated(false); })}>Sign out</button></div></header>
+    </nav><button className="quiet" onClick={() => void action(async () => { await send("/logout"); csrf = ""; setAuthenticated(false); })}>Sign out</button></header>
     <main><div className="global-error" role="alert">{error}</div>
       {searchPage ? <NewBatch key={page} initialInput={searchDraftQuery(page)} action={action} busy={busy} /> :
         page === "#/downloads" ? <DownloadsPage reload={reload} action={action} busy={busy} /> :
