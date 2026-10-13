@@ -86,6 +86,12 @@ nav a.current, nav a:hover { background: #343537; color: #fff; text-decoration: 
 .page-title > div { min-width: 0; }
 .page-title h1 { overflow-wrap: anywhere; }
 .page-title .button, .page-title .secondary { flex: none; }
+.dashboard-search { display: grid; gap: .5rem; }
+.dashboard-search > label { font-weight: 700; }
+.dashboard-search-row { display: flex; gap: .5rem; }
+.dashboard-search-row input { flex: 1; min-width: 0; }
+.dashboard-search-row button { flex: none; }
+.dashboard-search > small:not(.warn) { color: var(--muted); }
 .back { display: inline-block; margin-bottom: .5rem; }
 .panel { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .panel { margin-bottom: .85rem; padding: 1rem; }
@@ -211,9 +217,9 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .search-hit-actions button { min-height: 32px; padding: .3rem .55rem; }
 .search-activity .activity-list { margin: .3rem 0; }
 .request .check { padding: .3rem 0; }
-.candidate, .transfer { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-width: 0; padding: .55rem 0; border-top: 1px solid var(--line); }
-.candidate > span, .transfer > span { min-width: 0; overflow-wrap: anywhere; }
-.candidate strong, .transfer strong { display: block; }
+.candidate { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-width: 0; padding: .55rem 0; border-top: 1px solid var(--line); }
+.candidate > span { min-width: 0; overflow-wrap: anywhere; }
+.candidate strong { display: block; }
 .peer-group { min-width: 0; border-top: 1px solid var(--line); }
 .peer-group > summary { padding: .48rem .3rem; cursor: pointer; font-weight: 700; overflow-wrap: anywhere; }
 .directory-group { min-width: 0; margin-left: .8rem; border-top: 1px solid #303133; }
@@ -269,8 +275,6 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .check { display: flex; align-items: center; gap: .4rem; padding: .65rem 0; }
 .check input { width: auto; min-height: 0; accent-color: var(--accent); }
 .retry { display: flex; align-items: end; gap: .6rem; margin: .7rem 0; }
-.transfer progress { max-width: 130px; }
-.transfer .quiet { flex: none; color: var(--danger); }
 progress { width: 100%; height: .55rem; accent-color: var(--accent); }
 .job progress { margin-top: .3rem; }
 
@@ -298,6 +302,8 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .page-title { align-items: start; margin-bottom: .7rem; }
   .page-title p { font-size: .92rem; }
   .page-title .button { min-height: 38px; padding: .4rem .6rem; white-space: nowrap; }
+  .dashboard-search-row { flex-direction: column; }
+  .dashboard-search-row button { width: 100%; }
   .metric { padding: .3rem .45rem; }
   .metric strong { font-size: 1.35rem; }
   .metric span { font-size: .87rem; }
@@ -313,7 +319,7 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .panel { padding: .7rem; }
   input, textarea, select { min-height: 40px; font-size: 1rem; }
   .filters { grid-template-columns: 1fr; }
-  .candidate, .transfer { flex-wrap: wrap; align-items: start; }
+  .candidate { flex-wrap: wrap; align-items: start; }
   .candidate button { width: 100%; }
   .folder-candidate > .candidate button { width: auto; margin-left: auto; }
   .folder-hit, .folder-tree-columns, .folder-tree-file { grid-template-columns: minmax(0, 1fr) minmax(82px, 28%) max-content; gap: .3rem; }
@@ -327,7 +333,6 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .search-table td:nth-child(3) { grid-column: 1 / -1; grid-row: 2; }
   .search-table td:nth-child(4) { grid-column: 1; grid-row: 3; }
   .search-table td:nth-child(5) { grid-column: 2; grid-row: 3; }
-  .transfer progress { max-width: none; }
   .retry { flex-wrap: wrap; }
   .batch-tally { max-width: 42%; }
   .batch-tally small { line-height: 1.25; }

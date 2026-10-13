@@ -6,6 +6,7 @@ import { readApiResponse } from "./api-response";
 import { audioDetails, fileFormat } from "./audio-details";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
+import { searchDraftHash, searchDraftQuery } from "./search-navigation";
 import "./compact.css";
 
 let csrf = "";
@@ -104,15 +105,16 @@ function App(): React.ReactElement {
     </div></main>;
   const searchPath = page.startsWith("#/search/") ? "#/search/" : page.startsWith("#/batch/") ? "#/batch/" : null;
   const batchId = searchPath ? page.slice(searchPath.length).split("?")[0] : null;
+  const searchPage = page === "#/new" || page.startsWith("#/new?");
   return <div className="shell">
     <header><a className="brand" href="#/"><img className="brand-symbol" src="/phonofetch-mark.svg" alt="" /> Phonofetch</a><nav aria-label="Main navigation">
       <a className={page === "#/" ? "current" : ""} href="#/">Dashboard</a>
+      <a className={searchPage ? "current" : ""} href="#/new">Search</a>
       <a className={page === "#/downloads" ? "current" : ""} href="#/downloads">Downloads</a>
-      <a className={page === "#/new" ? "current" : ""} href="#/new">New Search</a>
       <a className={page === "#/activity" ? "current" : ""} href="#/activity">Activity Log</a>
     </nav><button className="quiet" onClick={() => void action(async () => { await send("/logout"); csrf = ""; setAuthenticated(false); })}>Sign out</button></header>
     <main><div className="global-error" role="alert">{error}</div>
-      {page === "#/new" ? <NewBatch action={action} busy={busy} /> :
+      {searchPage ? <NewBatch key={page} initialInput={searchDraftQuery(page)} action={action} busy={busy} /> :
         page === "#/downloads" ? <DownloadsPage reload={reload} action={action} busy={busy} /> :
         page === "#/activity" ? <ActivityPage reload={reload} /> :
           batchId ? <BatchPage id={batchId} page={page} reload={reload} action={action} busy={busy} /> :
@@ -141,12 +143,29 @@ function Dashboard({ reload }: { reload: number }): React.ReactElement {
   const [data, setData] = useState<{ batches: Array<Batch & { total: number }>;
     downloads: DownloadsData; activity: Activity[]; slskd_status: SlskdConnectionState }>();
   const [error, setError] = useState("");
+  const [searchText, setSearchText] = useState("");
+  const [searchError, setSearchError] = useState("");
   useEffect(() => { api<typeof data>("/dashboard").then(setData).catch(err => setError(String(err))); }, [reload]);
   const recentDownloads = [...(data?.downloads.active ?? []), ...(data?.downloads.finished ?? [])].slice(0, 5);
-  return <><div className="page-title"><div><h1>Dashboard</h1><p>Downloads and recent searches.</p></div>
-    <a className="button" href="#/new">+ New Search</a></div>
+  return <><div className="page-title"><div><h1>Dashboard</h1><p>Downloads and recent searches.</p></div></div>
     {data?.slskd_status === "unavailable" && <p role="status" className="service-warning">slskd unavailable. Searches stay pending until it reconnects. <a href="#/activity">View Activity Log</a></p>}
     <p role="alert">{error}</p>
+    <form className="panel dashboard-search" onSubmit={event => {
+      event.preventDefault();
+      const query = searchText.trim();
+      if (!query) { setSearchError("Enter a search term."); return; }
+      location.hash = searchDraftHash(query);
+    }}>
+      <label htmlFor="dashboard-search">New search</label>
+      <div className="dashboard-search-row">
+        <input id="dashboard-search" type="search" maxLength={256} required
+          value={searchText} onChange={event => { setSearchText(event.target.value); setSearchError(""); }}
+          placeholder="Artist, album, or track" />
+        <button type="submit">Search</button>
+      </div>
+      <small>Review your query in the Search tab before starting.</small>
+      {searchError && <small className="warn" role="alert">{searchError}</small>}
+    </form>
     <DownloadMetrics stats={data?.downloads.stats} />
     <section className="panel"><div className="panel-heading"><h2>Downloads</h2><a href="#/downloads">View all →</a></div>
       {!recentDownloads.length ? <p className="empty">No downloads yet.</p> :
@@ -200,13 +219,15 @@ function DownloadsPage({ reload, action, busy }: {
     </section></>;
 }
 
-function NewBatch({ action, busy }: { action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
-  const [input, setInput] = useState("");
+function NewBatch({ action, busy, initialInput }: {
+  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean; initialInput: string;
+}): React.ReactElement {
+  const [input, setInput] = useState(initialInput);
   const [automaticQuality, setAutomaticQuality] = useState<Quality>("mp3_320");
   const [automatic, setAutomatic] = useState(false);
   const [automaticType, setAutomaticType] = useState<"track" | "album_folder">("track");
   const [fileError, setFileError] = useState("");
-  return <><div className="page-title"><div><h1>New Search</h1><p>One query per line · up to 100 queries</p></div></div>
+  return <><div className="page-title"><div><h1>Search</h1><p>One query per line · up to 100 queries</p></div></div>
     <form className="panel form-panel" onSubmit={event => { event.preventDefault(); void action(async () => {
       const type: RequestType = automatic ? automaticType : "search";
       const seedKind: SeedKind = automatic && automaticType === "album_folder" ? "album_title" : "track_seed";
@@ -452,8 +473,6 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
         {job.excluded_count + job.unselected_count > 0 && <span className="warn"> · Partial folder: {job.excluded_count} quality-excluded, {job.unselected_count} unselected</span>}</p>
       <progress max={Math.max(1, job.transfers.reduce((sum, t) => sum + t.size, 0))}
         value={job.transfers.reduce((sum, t) => sum + t.transferred, 0)} /></div>)}
-    {request.transfers.length > 0 && <div><h3>Transfers</h3>{request.transfers.map(transfer =>
-      <Transfer key={transfer.id} transfer={transfer} action={action} busy={busy} />)}</div>}
   </section>;
 }
 
@@ -758,12 +777,6 @@ function DownloadRow({ item, action, busy }: { item: DownloadItem;
     <span className="download-size">{bytes(item.transferred)} / {bytes(item.size)}</span>
     <span className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></span>
   </div>;
-}
-
-function Transfer({ transfer, action, busy }: { transfer: TransferItem; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
-  return <div className="transfer"><span><strong>{basename(transfer.path)}</strong><small>{transfer.username} · {bytes(transfer.transferred)} / {bytes(transfer.size)} · {transfer.status}</small>
-    {transfer.error && <small className="warn">{transfer.error}</small>}</span><progress max={100} value={transfer.progress} />
-    <TransferActions transfer={transfer} action={action} busy={busy} /></div>;
 }
 
 function ActivityList({ events }: { events: Activity[] }): React.ReactElement {
