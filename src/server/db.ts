@@ -183,7 +183,8 @@ export class Store {
     console.log(JSON.stringify({ at, severity, category, eventType, message: safeMessage }));
   }
 
-  activity(filters: { severity?: string; category?: string; batchId?: string; requestId?: string; search?: string; cursor?: number; limit?: number } = {}): Activity[] {
+  activity(filters: { severity?: string; category?: string; batchId?: string; requestId?: string;
+    search?: string; cursor?: number; limit?: number; hideFileDetails?: boolean } = {}): Activity[] {
     const where: string[] = [];
     const args: SqlValue[] = [];
     for (const [column, value] of [["severity", filters.severity],
@@ -192,6 +193,7 @@ export class Store {
     }
     if (filters.category === "search") where.push("category IN ('search','batch')");
     else if (filters.category) { where.push("category=?"); args.push(filters.category); }
+    if (filters.hideFileDetails) where.push("event_type NOT IN ('folder_file_excluded','candidate_excluded','candidate_ranked')");
     if (filters.search) { where.push("message LIKE ? ESCAPE '\\'"); args.push(`%${filters.search.replace(/[\\%_]/g, "\\$&")}%`); }
     if (filters.cursor) { where.push("id<?"); args.push(filters.cursor); }
     return this.all<Activity>(`SELECT * FROM activity ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
@@ -271,7 +273,7 @@ export class Store {
           requests.some(request => ["active", "queueing", "searching", "pending"].includes(request.status)) ? "processing" : "review";
     return { batch: { ...batch, name: batchName(batch.number, requests[0]?.query_text ?? "", requests.length), status, counts },
       slskd_status: this.slskdStatus(),
-      requests, activity: this.activity({ batchId: id, limit: 15 }) };
+      requests, activity: this.activity({ batchId: id, limit: 15, hideFileDetails: true }) };
   }
 
   inflatePreview(row: Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number }): FolderPreview {

@@ -23,6 +23,9 @@ describe("SQLite persistence and activity", () => {
     expect(b.activity({ category: "search", search: "query" })).toHaveLength(1);
     b.event("info", "batch", "created", "Legacy search");
     expect(b.activity({ category: "search" })).toHaveLength(2);
+    b.event("info", "quality", "folder_file_excluded", "Old per-file quality event");
+    expect(b.activity({ hideFileDetails: true }).map(event => event.event_type))
+      .not.toContain("folder_file_excluded");
     expect(b.activity({ cursor: b.activity()[0]?.id, limit: 1 })).toHaveLength(1);
     b.close();
   });
