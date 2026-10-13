@@ -157,17 +157,13 @@ function DownloadsPage({ reload, action, busy }: {
     <section className="panel"><div className="panel-heading"><h2>Ongoing / needs attention</h2>
       <small>{data?.active_total ?? 0} transfers{data?.stats.uncertain_count ? ` · ${data.stats.uncertain_count} uncertain` : ""}</small></div>
       {!data?.active.length ? <p className="empty">No ongoing downloads.</p> :
-        data.active.map(item => <div className="download-item" key={item.id}>
-          <DownloadSource item={item} /><Transfer transfer={item} action={action} busy={busy} />
-        </div>)}
+        data.active.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy} />)}
       {data && data.active_total > data.active.length && <button className="secondary" onClick={() => setActiveLimit(limit => limit + 50)}>Load more ongoing</button>}
     </section>
     <section className="panel"><div className="panel-heading"><h2>Finished</h2>
       <small>{data?.finished_total ?? 0} in list</small></div>
       {!data?.finished.length ? <p className="empty">No finished downloads in the list.</p> :
-        data.finished.map(item => <div className="download-item" key={item.id}>
-          <DownloadSource item={item} /><Transfer transfer={item} action={action} busy={busy} />
-        </div>)}
+        data.finished.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy} />)}
       {data && data.finished_total > data.finished.length && <button className="secondary" onClick={() => setFinishedLimit(limit => limit + 50)}>Load more finished</button>}
     </section></>;
 }
@@ -342,7 +338,7 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
       <label>Filter files<input value={filterText} onChange={event => setFilterText(event.target.value)}
         placeholder="words -word minbr:320 iscbr" /></label>
       {parsedFilter.error && <small className="warn" role="alert">{parsedFilter.error}</small>}
-      {preset === "mp3_320" && <small>Only peer-reported 320 kbps CBR. Unknown bitrate stays under All.</small>}
+      {preset === "mp3_320" && <small>Peer-reported 320 kbps MP3. Add iscbr to require confirmed CBR.</small>}
     </div>}
     {["failed", "no_results", "review", "cancelled"].includes(request.status) && request.transfers.length === 0 &&
       <details className="retry-options"><summary>{request.status === "review" ? "Search options" : "Retry search"}</summary>
@@ -634,16 +630,42 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, confirmP
   </div>;
 }
 
-function Transfer({ transfer, action, busy }: { transfer: TransferItem; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
-  return <div className="transfer"><span><strong>{basename(transfer.path)}</strong><small>{transfer.username} · {bytes(transfer.transferred)} / {bytes(transfer.size)} · {transfer.status}</small>
-    {transfer.error && <small className="warn">{transfer.error}</small>}</span><progress max={100} value={transfer.progress} />
+function TransferActions({ transfer, action, busy }: { transfer: TransferItem;
+  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
+  return <>
     {["queued", "active"].includes(transfer.status) && <button className="quiet" disabled={busy} onClick={() => {
       if (confirm(`Cancel ${basename(transfer.path)}?`)) void action(() => send(`/transfers/${transfer.id}/cancel`));
     }}>Cancel</button>}
     {["failed", "cancelled"].includes(transfer.status) && <button className="secondary" disabled={busy} onClick={() => {
       if (confirm(`Retry exactly ${basename(transfer.path)} at the same required quality?`))
         void action(() => send(`/transfers/${transfer.id}/retry`));
-    }}>Retry file</button>}</div>;
+    }}>Retry file</button>}</>;
+}
+
+function DownloadRow({ item, action, busy }: { item: DownloadItem;
+  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
+  const progress = item.status === "completed" ? 100 : Math.max(0, Math.min(100, item.progress));
+  const label = item.status === "active" ? `${Math.round(progress)}%` :
+    item.status === "completed" ? "Completed" : item.status.replace("_", " ");
+  return <div className="download-row">
+    <div className="download-file"><strong title={item.path}>{basename(item.path)}</strong>
+      <small title={item.query_text}><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>
+        Search #{item.batch_number} · {item.query_text}</a> · {item.username}</small>
+      {item.error && <small className="warn">{item.error}</small>}</div>
+    <div className={`download-bar ${item.status}`} role="progressbar" aria-valuemin={0} aria-valuemax={100}
+      aria-valuenow={progress} aria-label={`${basename(item.path)}: ${label}`}>
+      <span className="download-bar-fill" style={{ width: `${progress}%` }} />
+      <span className="download-bar-label">{label}</span>
+    </div>
+    <span className="download-size">{bytes(item.transferred)} / {bytes(item.size)}</span>
+    <span className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></span>
+  </div>;
+}
+
+function Transfer({ transfer, action, busy }: { transfer: TransferItem; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
+  return <div className="transfer"><span><strong>{basename(transfer.path)}</strong><small>{transfer.username} · {bytes(transfer.transferred)} / {bytes(transfer.size)} · {transfer.status}</small>
+    {transfer.error && <small className="warn">{transfer.error}</small>}</span><progress max={100} value={transfer.progress} />
+    <TransferActions transfer={transfer} action={action} busy={busy} /></div>;
 }
 
 function ActivityList({ events }: { events: Activity[] }): React.ReactElement {

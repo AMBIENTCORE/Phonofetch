@@ -9,6 +9,7 @@ import { loadConfig } from "./config";
 import { Store } from "./db";
 import { parentDirectory, unknownMetadata } from "./matching";
 import type { RemoteTransfer, SearchSnapshot, SlskdPort } from "./port";
+import { SlskdShapeError } from "./slskd";
 import { Workflow } from "./workflow";
 import { Worker } from "./worker";
 
@@ -539,6 +540,23 @@ describe("authenticated mixed-batch workflow", () => {
     expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
       .send({ previewId: preview.body.id })).status).toBe(409);
     expect(store.all("SELECT * FROM transfers")).toHaveLength(0);
+  });
+
+  it("shows the failing peer field instead of a generic inspection error", async () => {
+    const { app, port, worker } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[1]!.original, defaultType: "album_folder", mode: "review", entries: [entries[1]]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    vi.mocked(port.browse).mockRejectedValueOnce(
+      new SlskdShapeError("POST directory", "directories.0.files.3.size", "expected nonnegative number"));
+    const result = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(result.status).toBe(502);
+    expect(result.body.error).toContain("directories.0.files.3.size");
+    expect(result.body.error).not.toContain("test-api-key");
   });
 
   it("never relaxes strict quality and only searches at a different quality after an explicit retry", async () => {

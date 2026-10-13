@@ -8,6 +8,7 @@ import type { Config } from "./config";
 import { Store, batchName } from "./db";
 import { normalize, parseLines } from "./matching";
 import type { SlskdPort } from "./port";
+import { SlskdShapeError } from "./slskd";
 import { Workflow } from "./workflow";
 
 const uuid = z.uuid();
@@ -232,6 +233,11 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
       return;
     }
     if (error instanceof ApiError) { res.status(error.status).json({ error: store.redact(error.message) }); return; }
+    if (error instanceof SlskdShapeError) {
+      store.event("error", "api", "request_failed", error.message);
+      res.status(502).json({ error: store.redact(error.message) });
+      return;
+    }
     store.event("error", "api", "request_failed", `Request failed: ${store.redact(error instanceof Error ? error.message : "Unknown error")}`);
     res.status(502).json({ error: "Request could not be completed; see the Activity Log" });
   };

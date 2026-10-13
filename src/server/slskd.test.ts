@@ -98,6 +98,62 @@ describe("slskd 0.26.1 REST adapter", () => {
     ]);
   });
 
+  it("does not reject the selected folder because a sibling contains an invalid file", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetcher = vi.fn(async () => json([
+      { name: "Music\\Sibling", files: null },
+      { name: "Music\\Other", files: [{ filename: "bad.jpg", size: -1 }] },
+      { name: "Music\\Album", files: [{ filename: "Song.flac", size: 100 }] }
+    ]));
+    try {
+      const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+      expect((await adapter.browse("alice", "Music\\Album", false)).map(item => item.path))
+        .toEqual(["Music\\Album\\Song.flac"]);
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith("slskd POST directory ignored 1 malformed entries outside the selected folder");
+    } finally { warn.mockRestore(); }
+  });
+
+  it("uses a full-share browse if the targeted directory response has an invalid selected file", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/directory") ?
+      json([{ name: "Music\\Album", files: [{ filename: "Music\\Album\\bad.mp3", size: -1 }] }]) :
+      json([{ name: "Music\\Album", files: [{ filename: "Song.flac", size: 100 }] }]));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+      expect((await adapter.browse("alice", "Music\\Album", false)).map(item => item.path))
+        .toEqual(["Music\\Album\\Song.flac"]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("directories.0.files.0.size"));
+      expect(fetcher.mock.calls.map(call => String(call[0]))).toEqual([
+        "http://slskd:5030/api/v0/users/alice/directory",
+        "http://slskd:5030/api/v0/users/alice/browse"
+      ]);
+    } finally { warn.mockRestore(); }
+  });
+
+  it("reports the invalid field if both targeted and full-share responses are unusable", async () => {
+    const invalid = [{ name: "Music\\Album", files: [{ filename: "Music\\Album\\bad.mp3", size: -1 }] }];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, vi.fn(async () => json(invalid)));
+      await expect(adapter.browse("alice", "Music\\Album", false))
+        .rejects.toThrow("GET browse returned unexpected response shape at directories.0.files.0.size");
+    } finally { warn.mockRestore(); }
+  });
+
+  it("accepts the full-share directory list when a peer returns a non-list targeted response", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/directory") ?
+      json({ name: "Music\\Album", files: [file("Music\\Album\\Song.flac")] }) :
+      json([{ name: "Music\\Album", files: [{ filename: "Song.flac", size: 100 }] }]));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+      expect((await adapter.browse("alice", "Music\\Album", false)).map(item => item.path))
+        .toEqual(["Music\\Album\\Song.flac"]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("root"));
+    } finally { warn.mockRestore(); }
+  });
+
   it("reports a directory response with files that do not match the selected folder", async () => {
     const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10,
       vi.fn(async () => json([{ name: "Music/Sibling", files: [{ filename: "song.flac", size: 100 }] }])));

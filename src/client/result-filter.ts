@@ -37,7 +37,9 @@ export function parseResultFilter(input: string): { value: Criteria | null; erro
 
 export function matchesResult(file: Pick<RemoteFile, "path" | "size" | "metadata">,
   preset: ResultPreset, criteria: Criteria): boolean {
-  if (preset !== "all" && !qualityCheck(file, preset).eligible) return false;
+  if (preset === "flac" && !qualityCheck(file, "flac").eligible) return false;
+  if (preset === "mp3_320" && (!qualityCheck(file, "any").eligible ||
+    !/\.mp3$/i.test(file.path) || file.metadata.bitrate !== 320)) return false;
   const path = file.path.toLowerCase();
   if (criteria.include.some(term => !path.includes(term)) || criteria.exclude.some(term => path.includes(term))) return false;
   if (criteria.minBitrate !== null && (file.metadata.bitrate === null || file.metadata.bitrate < criteria.minBitrate))

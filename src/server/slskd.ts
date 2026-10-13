@@ -13,7 +13,7 @@ const remoteFile = z.object({
   isVariableBitRate: z.boolean().nullable().optional(),
   attributes: z.array(z.object({ type: z.number(), value: z.number() })).optional()
 });
-const directory = z.object({ name: z.string().min(1), files: z.array(remoteFile) });
+const directory = z.object({ name: z.string().min(1), files: z.array(z.unknown()) });
 const search = z.object({
   id: z.string(), state: z.string(),
   fileCount: z.number().int().nonnegative(), responseCount: z.number().int().nonnegative(),
@@ -42,6 +42,12 @@ const batchResponse = z.object({
 export class SlskdError extends Error {
   constructor(readonly status: number, operation: string) {
     super(`slskd ${operation} failed (HTTP ${status})`);
+  }
+}
+
+export class SlskdShapeError extends Error {
+  constructor(operation: string, location: string, detail: string) {
+    super(`slskd ${operation} returned unexpected response shape at ${location}: ${detail}`);
   }
 }
 
@@ -83,8 +89,16 @@ export class SlskdAdapter implements SlskdPort {
     } finally { reader.releaseLock(); }
     text += decoder.decode();
     if (!text.trim()) return schema.parse(null);
-    try { return schema.parse(JSON.parse(text) as unknown); }
-    catch { throw new Error(`slskd ${method} returned unexpected response shape`); }
+    let decoded: unknown;
+    try { decoded = JSON.parse(text) as unknown; }
+    catch { throw new SlskdShapeError(`${method} ${path.split("?")[0]}`, "root", "invalid JSON"); }
+    const parsed = schema.safeParse(decoded);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new SlskdShapeError(`${method} ${path.split("?")[0]}`,
+        issue?.path.map(String).join(".") || "root", issue?.message ?? "invalid data");
+    }
+    return parsed.data;
   }
 
   private meta(file: z.infer<typeof remoteFile>): AudioMetadata {
@@ -144,34 +158,82 @@ export class SlskdAdapter implements SlskdPort {
   async browse(username: string, selectedDirectory: string, recursive: boolean): Promise<RemoteFile[]> {
     const endpoint = `/api/v0/users/${encodeURIComponent(username)}`;
     const normalizeDirectory = (path: string): string => path.replace(/\\/g, "/").replace(/\/+$/, "");
-    const collect = (directories: z.infer<typeof directory>[]): { files: RemoteFile[]; returnedFiles: number } => {
+    const collect = (raw: unknown, operation: string): { files: RemoteFile[]; returnedFiles: number } => {
+      const parsed = z.array(z.unknown()).safeParse(raw);
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        throw new SlskdShapeError(operation, issue?.path.map(String).join(".") || "root",
+          issue?.message ?? "invalid directory list");
+      }
       const files: RemoteFile[] = [];
       let returnedFiles = 0;
-      for (const item of directories) {
-        for (const file of item.files) {
+      let ignoredMalformed = 0;
+      for (const [index, rawDirectory] of parsed.data.entries()) {
+        const named = z.object({ name: z.string().min(1) }).safeParse(rawDirectory);
+        if (!named.success) {
+          const issue = named.error.issues[0];
+          throw new SlskdShapeError(operation, `directories.${index}.${issue?.path.map(String).join(".") || "name"}`,
+            issue?.message ?? "invalid directory name");
+        }
+        const sameDirectory = normalizeDirectory(named.data.name) === normalizeDirectory(selectedDirectory);
+        const parsedDirectory = directory.safeParse(rawDirectory);
+        if (!parsedDirectory.success) {
+          if (!recursive && !sameDirectory) { ignoredMalformed++; continue; }
+          const issue = parsedDirectory.error.issues[0];
+          throw new SlskdShapeError(operation, `directories.${index}.${issue?.path.map(String).join(".") || "files"}`,
+            issue?.message ?? "invalid directory");
+        }
+        const item = parsedDirectory.data;
+        for (const [fileIndex, rawFile] of item.files.entries()) {
           returnedFiles++;
-          const sameDirectory = normalizeDirectory(item.name) === normalizeDirectory(selectedDirectory);
           const separator = item.name.includes("\\") ? "\\" : "/";
-          const fullPath = withinDirectory(file.filename, selectedDirectory, recursive) ? file.filename :
-            (sameDirectory || recursive) && !/[\\/]/.test(file.filename) ?
-              `${item.name.replace(/[\\/]$/, "")}${separator}${file.filename}` : "";
+          const name = z.object({ filename: z.string().min(1) }).safeParse(rawFile);
+          if (!name.success) {
+            if (!recursive && !sameDirectory) { ignoredMalformed++; continue; }
+            const issue = name.error.issues[0];
+            throw new SlskdShapeError(operation, `directories.${index}.files.${fileIndex}.${issue?.path.map(String).join(".") || "filename"}`,
+              issue?.message ?? "invalid filename");
+          }
+          const fullPath = withinDirectory(name.data.filename, selectedDirectory, recursive) ? name.data.filename :
+            (sameDirectory || recursive) && !/[\\/]/.test(name.data.filename) ?
+              `${item.name.replace(/[\\/]$/, "")}${separator}${name.data.filename}` : "";
           if (!withinDirectory(fullPath, selectedDirectory, recursive)) continue;
+          const parsedFile = remoteFile.safeParse(rawFile);
+          if (!parsedFile.success) {
+            const issue = parsedFile.error.issues[0];
+            throw new SlskdShapeError(operation, `directories.${index}.files.${fileIndex}.${issue?.path.map(String).join(".") || "file"}`,
+              issue?.message ?? "invalid file");
+          }
+          const file = parsedFile.data;
           files.push({ username, path: fullPath, directory: parentDirectory(fullPath),
             size: file.size, metadata: this.meta(file) });
         }
       }
+      if (ignoredMalformed)
+        console.warn(`slskd ${operation} ignored ${ignoredMalformed} malformed entries outside the selected folder`);
       return { files, returnedFiles };
     };
     if (recursive) {
-      const result = collect(await this.call("GET", `${endpoint}/browse`, z.array(directory)));
+      const result = collect(await this.call("GET", `${endpoint}/browse`, z.unknown()), "GET browse");
       if (result.returnedFiles && !result.files.length)
         throw new Error(`slskd returned ${result.returnedFiles} remote files, but none had paths within the selected folder`);
       return result.files;
     }
-    const direct = collect(await this.call("POST", `${endpoint}/directory`, z.array(directory), { directory: selectedDirectory }));
+    let direct: { files: RemoteFile[]; returnedFiles: number };
+    let shapeError: SlskdShapeError | undefined;
+    try {
+      direct = collect(await this.call("POST", `${endpoint}/directory`, z.unknown(), { directory: selectedDirectory }),
+        "POST directory");
+    } catch (error) {
+      if (!(error instanceof SlskdShapeError)) throw error;
+      shapeError = error;
+      console.warn(`${error.message}; trying full-share browse`);
+      direct = { files: [], returnedFiles: 0 };
+    }
     if (direct.files.length) return direct.files;
-    const fullShare = collect(await this.call("GET", `${endpoint}/browse`, z.array(directory)));
+    const fullShare = collect(await this.call("GET", `${endpoint}/browse`, z.unknown()), "GET browse");
     if (fullShare.files.length) return fullShare.files;
+    if (shapeError) throw new Error(`${shapeError.message}; full-share browse found no files in the selected folder`);
     if (direct.returnedFiles || fullShare.returnedFiles)
       throw new Error(`slskd returned ${direct.returnedFiles} files from the selected directory and ${fullShare.returnedFiles} from the share, but none had paths within the selected folder`);
     return [];
