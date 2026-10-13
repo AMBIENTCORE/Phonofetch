@@ -16,7 +16,9 @@ describe("request parsing and matching", () => {
     expect(rows[2]?.error).toBeUndefined();
     expect(rows[3]?.error).toBe("Enter searchable text, not only punctuation.");
     expect(normalize("Búrial")).toBe("burial");
-    expect(parseLines("ben klock subzero")[0]?.queryText).toBe("ben klock subzero");
+    expect(parseLines("ben klock subzero")[0]).toMatchObject({
+      queryText: "ben klock subzero", type: "search", seedKind: "track_seed"
+    });
   });
 
   it("rejects unknown or variable bitrate and never trusts filenames", () => {
@@ -51,6 +53,8 @@ describe("request parsing and matching", () => {
   });
 
   it("does not cross directory boundaries without explicit recursion", () => {
+    expect(parentDirectory("Song.flac")).toBe("");
+    expect(parentDirectory("Album\\Song.flac")).toBe("Album");
     expect(withinDirectory("peer\\Album\\one.flac", "peer\\Album", false)).toBe(true);
     expect(withinDirectory("peer\\Album\\Disc 2\\two.flac", "peer\\Album", false)).toBe(false);
     expect(withinDirectory("peer\\Album\\Disc 2\\two.flac", "peer\\Album", true)).toBe(true);

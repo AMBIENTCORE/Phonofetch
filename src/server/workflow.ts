@@ -26,7 +26,8 @@ export class Workflow {
   }
 
   async preview(request: MusicRequest, candidate: Candidate, recursive: boolean): Promise<FolderPreview> {
-    if (request.type !== "album_folder" || request.id !== candidate.request_id) throw new ApiError(400, "Not an album candidate");
+    if (!["album_folder", "search"].includes(request.type) || request.id !== candidate.request_id)
+      throw new ApiError(400, "Not a folder candidate");
     this.store.event("info", "folder", "browse_started", "Browsing remote folder", { batchId: request.batch_id, requestId: request.id },
       { username: candidate.username, directory: candidate.directory, recursive });
     try {
@@ -41,6 +42,11 @@ export class Workflow {
         throw new ApiError(413, "Folder size exceeds a reliable byte count");
       const eligibleBytes = files.reduce((total, file) => total + (file.eligible ? file.size : 0), 0);
       if (eligibleBytes > this.config.MAX_FOLDER_BYTES) throw new ApiError(413, "Eligible files exceed configured size limit");
+      const latest = this.store.get<Pick<MusicRequest, "quality" | "type" | "status">>(
+        "SELECT quality,type,status FROM requests WHERE id=?", request.id);
+      if (!latest || latest.quality !== request.quality || latest.type !== request.type ||
+        !["review", "no_results"].includes(latest.status))
+        throw new ApiError(409, "Search settings changed; inspect this folder again");
       const preview = this.store.savePreview({ request_id: request.id, username: candidate.username,
         directory: candidate.directory, recursive, files });
       this.store.event("success", "folder", "browse_completed",
@@ -48,9 +54,6 @@ export class Workflow {
         { batchId: request.batch_id, requestId: request.id },
         { directory: candidate.directory, audioBytes: preview.audio_bytes, eligibleBytes,
           ignoredNonAudio: bounded.length - audio.length });
-      for (const file of files.filter(item => !item.eligible))
-        this.store.event("info", "quality", "folder_file_excluded", `${file.path}: ${file.reason}`,
-          { batchId: request.batch_id, requestId: request.id });
       return preview;
     } catch (error) {
       this.store.event("error", "folder", "browse_failed", `Could not inspect folder: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -60,7 +63,8 @@ export class Workflow {
   }
 
   async queueFolder(request: MusicRequest, preview: FolderPreview, selectedPaths?: string[]): Promise<string> {
-    if (preview.request_id !== request.id || request.type !== "album_folder") throw new ApiError(400, "Invalid folder preview");
+    if (preview.request_id !== request.id || !["album_folder", "search"].includes(request.type))
+      throw new ApiError(400, "Invalid folder preview");
     if (Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000) throw new ApiError(409, "Folder preview expired; inspect again");
     const eligible = preview.files.filter(file => file.eligible && qualityCheck(file, request.quality).eligible);
     if (!eligible.length) throw new ApiError(422, "No files meet strict quality criteria");
@@ -88,6 +92,11 @@ export class Workflow {
     if (signature(now) !== signature(preview.files)) throw new ApiError(409, "Remote folder changed; inspect again before queueing");
     const id = randomUUID();
     this.store.transaction(() => {
+      const latest = this.store.get<Pick<MusicRequest, "quality" | "type" | "status">>(
+        "SELECT quality,type,status FROM requests WHERE id=?", request.id);
+      if (!latest || latest.quality !== request.quality || latest.type !== request.type ||
+        !["review", "no_results"].includes(latest.status))
+        throw new ApiError(409, "Search settings changed; inspect this folder again");
       const active = this.store.get<{ id: string }>("SELECT id FROM transfers WHERE request_id=? LIMIT 1", request.id);
       if (active) throw new ApiError(409, "This request already has transfers; no duplicate enqueue");
       const date = new Date().toISOString();
@@ -107,7 +116,7 @@ export class Workflow {
   }
 
   queueTrack(request: MusicRequest, candidate: Candidate): string {
-    if (candidate.request_id !== request.id || request.type !== "track" || !candidate.eligible ||
+    if (candidate.request_id !== request.id || !["track", "search"].includes(request.type) || !candidate.eligible ||
       !qualityCheck(candidate, request.quality).eligible) throw new ApiError(422, "Selected file does not meet strict quality criteria");
     const id = randomUUID();
     this.store.transaction(() => {
@@ -130,6 +139,40 @@ export class Workflow {
     const id = randomUUID();
     this.store.run(`INSERT INTO transfers(id,queue_id,request_id,folder_job_id,username,path,size,status,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,'ready',?,?)`, id, id, request.id, jobId, file.username, file.path, file.size, date, date);
+  }
+
+  showAllResults(request: MusicRequest): void {
+    if (request.quality === "any" || !["review", "no_results"].includes(request.status) ||
+      this.store.get("SELECT id FROM transfers WHERE request_id=? LIMIT 1", request.id))
+      throw new ApiError(409, "Only an unqueued, quality-limited search can show all results");
+    const candidates = this.store.all<{ id: string; path: string; size: number; metadata: string }>(
+      "SELECT id,path,size,metadata FROM candidates WHERE request_id=?", request.id);
+    const previews = this.store.all<{ id: string; files: string }>(
+      "SELECT id,files FROM folder_previews WHERE request_id=?", request.id);
+    let available = 0;
+    this.store.transaction(() => {
+      for (const candidate of candidates) {
+        const result = qualityCheck({ path: candidate.path, size: candidate.size,
+          metadata: JSON.parse(candidate.metadata) as AudioMetadata }, "any");
+        if (result.eligible) available++;
+        this.store.run("UPDATE candidates SET eligible=?,reason=? WHERE id=?",
+          Number(result.eligible), result.reason, candidate.id);
+      }
+      for (const preview of previews) {
+        const files = (JSON.parse(preview.files) as PreviewFile[]).map(file => ({
+          ...file, ...qualityCheck(file, "any")
+        }));
+        this.store.run("UPDATE folder_previews SET files=? WHERE id=?", JSON.stringify(files), preview.id);
+      }
+      this.store.run(`UPDATE requests SET quality='any',type='search',mode='review',status=?,error=?,updated_at=? WHERE id=?`,
+        available ? "review" : "no_results",
+        available ? null : candidates.length ? "No supported audio search hits; inspect folders for more files" :
+          "Soulseek returned no files for this text search",
+        new Date().toISOString(), request.id);
+      this.store.event("info", "search", "quality_limit_removed",
+        `All audio results enabled without a new search (${available} searchable files)`,
+        { batchId: request.batch_id, requestId: request.id });
+    });
   }
 
   retry(request: MusicRequest, quality: Quality, longer = false): void {

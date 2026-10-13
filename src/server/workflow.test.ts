@@ -82,6 +82,164 @@ const entries = [
 ];
 
 describe("authenticated mixed-batch workflow", () => {
+  it("keeps missing-bitrate MP3 files selectable in an unfiltered manual search", async () => {
+    const { app, worker, port, folderFiles, setSnapshot } = setup();
+    const auth = await login(app);
+    setSnapshot({ id: "search-1", state: "Completed", finished: true,
+      reportedFileCount: 1, reportedResponseCount: 1, results: [folderFiles[2]!] });
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial Song", defaultType: "search", mode: "review",
+      entries: [{ original: "Burial Song", queryText: "Burial Song", type: "search",
+        seedKind: "track_seed", quality: "any" }]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(item).toMatchObject({ quality: "any", type: "search", status: "review" });
+    expect(item.candidates[0]).toMatchObject({ eligible: true, metadata: { bitrate: null, vbr: null } });
+    const preview = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(preview.body).toMatchObject({ eligible_count: 3, excluded_count: 0 });
+    expect((await request(app).post(`/api/requests/${item.id}/select`).set(auth)
+      .send({ candidateId: item.candidates[0].id })).status).toBe(202);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("can reveal old quality-limited results and queue a folder subset without another search", async () => {
+    const { app, store, worker, folderFiles, setSnapshot, port } = setup();
+    const auth = await login(app);
+    setSnapshot({ id: "search-1", state: "Completed", finished: true,
+      reportedFileCount: 1, reportedResponseCount: 1, results: [folderFiles[2]!] });
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial Song", defaultType: "album_folder", mode: "review",
+      entries: [{ original: "Burial Song", queryText: "Burial Song", type: "album_folder",
+        seedKind: "track_seed", quality: "mp3_320" }]
+    });
+    await worker.runOnce();
+    let item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(item).toMatchObject({ status: "no_results", quality: "mp3_320" });
+    const preview = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(preview.body.eligible_count).toBe(0);
+    expect(store.activity({ requestId: item.id, category: "quality" })).toHaveLength(0);
+    expect((await request(app).post(`/api/requests/${item.id}/show-all`).set(auth).send({})).status).toBe(200);
+    item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(item).toMatchObject({ type: "search", mode: "review", quality: "any", status: "review", error: null });
+    expect(item.candidates[0]).toMatchObject({ eligible: true, metadata: { bitrate: null } });
+    expect(item.previews[0]).toMatchObject({ eligible_count: 3, excluded_count: 0 });
+    const mp3 = item.previews[0].files.find((file: { path: string }) => file.path.endsWith(".mp3"));
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: preview.body.id, selectedPaths: [mp3.path] })).status).toBe(202);
+    expect((await request(app).post(`/api/requests/${item.id}/show-all`).set(auth).send({})).status).toBe(409);
+    await worker.runOnce();
+    expect(port.startSearch).toHaveBeenCalledOnce();
+    expect(port.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("does not persist a folder preview created under an old quality rule after it is removed", async () => {
+    const { app, store, worker, port, folderFiles, setSnapshot } = setup();
+    const auth = await login(app);
+    setSnapshot({ id: "search-1", state: "Completed", finished: true,
+      reportedFileCount: 1, reportedResponseCount: 1, results: [folderFiles[2]!] });
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial Song", defaultType: "album_folder", mode: "review",
+      entries: [{ original: "Burial Song", queryText: "Burial Song", type: "album_folder",
+        seedKind: "track_seed", quality: "mp3_320" }]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    let startBrowse!: () => void;
+    let finishBrowse!: (files: RemoteFile[]) => void;
+    const started = new Promise<void>(resolve => { startBrowse = resolve; });
+    vi.mocked(port.browse).mockImplementationOnce(async () => {
+      startBrowse();
+      return new Promise<RemoteFile[]>(resolve => { finishBrowse = resolve; });
+    });
+    const pending = request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id }).then(response => response);
+    await started;
+    expect((await request(app).post(`/api/requests/${item.id}/show-all`).set(auth).send({})).status).toBe(200);
+    finishBrowse(folderFiles);
+    expect((await pending).status).toBe(409);
+    expect(store.batchDetail(created.body.id)?.requests[0]?.previews).toHaveLength(0);
+  });
+
+  it("searches all files without an upfront track/folder choice and queues one selected result", async () => {
+    const { app, port, worker } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial - Archangel", defaultType: "search", mode: "review",
+      entries: [{ ...entries[0], type: "search" }]
+    });
+    expect(created.status).toBe(201);
+    await worker.runOnce();
+    expect(port.startSearch).toHaveBeenCalledWith("burial archangel", 5000);
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(item).toMatchObject({ type: "search", status: "review", quality: "flac" });
+    expect((await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id })).status).toBe(200);
+    expect((await request(app).post(`/api/requests/${item.id}/select`).set(auth)
+      .send({ candidateId: item.candidates[0].id })).status).toBe(202);
+    expect((await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id })).status).toBe(409);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("queues a selected subset of a folder from the same untyped search", async () => {
+    const { app, worker, store, port } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial - Untrue", defaultType: "search", mode: "review",
+      entries: [{ ...entries[1], type: "search", seedKind: "track_seed" }]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const preview = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(preview.status).toBe(200);
+    expect(preview.body).toMatchObject({ eligible_count: 2, excluded_count: 1 });
+    const selected = preview.body.files.find((file: { path: string }) => file.path.endsWith("01 - Archangel.flac"));
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: preview.body.id, selectedPaths: [selected.path] })).status).toBe(202);
+    expect(store.batchDetail(created.body.id)?.requests[0]?.jobs[0]).toMatchObject({
+      selected_count: 1, unselected_count: 1
+    });
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("queues a root-level search hit without requiring folder inspection", async () => {
+    const { app, worker, setSnapshot, port } = setup();
+    const auth = await login(app);
+    const rootFile = remote("Example.flac");
+    setSnapshot({ id: "search-1", state: "Completed", finished: true,
+      reportedFileCount: 1, reportedResponseCount: 1, results: [rootFile] });
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Example", defaultType: "search", mode: "review",
+      entries: [{ original: "Example", queryText: "Example", type: "search",
+        seedKind: "track_seed", quality: "flac" }]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(item.candidates[0]).toMatchObject({ path: "Example.flac", directory: "", eligible: true });
+    expect((await request(app).post(`/api/requests/${item.id}/select`).set(auth)
+      .send({ candidateId: item.candidates[0].id })).status).toBe(202);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("does not accept an untyped search in automatic mode", async () => {
+    const { app } = setup();
+    const auth = await login(app);
+    const response = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[0]!.original, defaultType: "search", mode: "automatic",
+      entries: [{ ...entries[0], type: "search" }]
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error).toContain("Automatic downloads require choosing");
+  });
+
   it("numbers batches, stores edited full-text lines and permits removing reviewed lines", async () => {
     const { app, store } = setup();
     const auth = await login(app);

@@ -14,13 +14,13 @@ const uuid = z.uuid();
 const entry = z.object({
   original: z.string().min(1).max(256),
   queryText: z.string().trim().min(1).max(256),
-  type: z.enum(["track", "album_folder"]),
+  type: z.enum(["search", "track", "album_folder"]),
   seedKind: z.enum(["track_seed", "album_title"]),
   quality: z.enum(["mp3_320", "flac", "any"])
 });
 const newBatch = z.object({
   originalInput: z.string().min(1).max(32768),
-  defaultType: z.enum(["track", "album_folder"]),
+  defaultType: z.enum(["search", "track", "album_folder"]),
   mode: z.enum(["review", "automatic"]),
   entries: z.array(entry).min(1).max(100)
 });
@@ -68,6 +68,8 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
     const body = newBatch.parse(req.body);
     const sourceLines = parseLines(body.originalInput, body.defaultType);
     if (sourceLines.length > 100) throw new ApiError(400, "A search can contain at most 100 nonempty lines");
+    if (body.mode === "automatic" && body.entries.some(item => item.type === "search"))
+      throw new ApiError(400, "Automatic downloads require choosing a track or album folder");
     const available = new Map<string, number>();
     for (const line of sourceLines) available.set(line.original, (available.get(line.original) ?? 0) + 1);
     const seen = new Set<string>();
@@ -157,6 +159,10 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
       quality: z.enum(["mp3_320", "flac", "any"]), longer: z.boolean().default(false)
     }).parse(req.body);
     workflow.retry(request, quality, longer);
+    res.json({ ok: true });
+  });
+  app.post("/api/requests/:id/show-all", (req, res) => {
+    workflow.showAllResults(getRequest(req.params.id));
     res.json({ ok: true });
   });
   app.post("/api/transfers/:id/cancel", async (req, res) => {

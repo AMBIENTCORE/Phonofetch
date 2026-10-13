@@ -1,4 +1,4 @@
-export type RequestType = "track" | "album_folder";
+export type RequestType = "search" | "track" | "album_folder";
 export type Quality = "mp3_320" | "flac" | "any";
 export type Mode = "review" | "automatic";
 export type SeedKind = "track_seed" | "album_title";

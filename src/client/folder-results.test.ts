@@ -44,4 +44,17 @@ describe("bounded folder inspection", () => {
     expect(autoFolderPreviews([item], new Set()).map(folder => folder.candidateId))
       .toEqual(["candidate-2", "candidate-3", "candidate-4", "candidate-5", "candidate-6"]);
   });
+
+  it("inspects folders discovered by an untyped manual search", () => {
+    const item = { ...request(), type: "search" as const };
+    expect(autoFolderPreviews([item], new Set()).map(folder => folder.candidateId))
+      .toEqual(["candidate-0", "candidate-1", "candidate-2", "candidate-3", "candidate-4"]);
+  });
+
+  it("leaves root-level search hits available as files without attempting an empty-directory browse", () => {
+    const item = { ...request(), type: "search" as const };
+    item.candidates[0]!.directory = "";
+    expect(autoFolderPreviews([item], new Set()).map(folder => folder.candidateId))
+      .toEqual(["candidate-1", "candidate-2", "candidate-3", "candidate-4", "candidate-5"]);
+  });
 });

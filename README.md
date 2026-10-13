@@ -1,6 +1,6 @@
 # Phonofetch
 
-Phonofetch is a self-hosted, phone-friendly search and download manager for an **existing slskd instance**. Each line you enter is a Soulseek text search; choose a single track or inspect an album folder, then queue qualifying files through slskd. Transfers and the Activity Log continue on the server after you close the browser.
+Phonofetch is a self-hosted, phone-friendly search and download manager for an **existing slskd instance**. Each line is a full-text Soulseek search; choose a file or inspect a folder from the results, then queue qualifying files through slskd. Transfers and the Activity Log continue on the server after you close the browser.
 
 ![Phonofetch folder search results with sample data](./docs/search-results-demo.png)
 
@@ -11,9 +11,10 @@ Phonofetch is a self-hosted, phone-friendly search and download manager for an *
 - Results are grouped by peer and folder. The leading folders are inspected automatically; expand **Other folders** or select **Inspect** to browse more. File and folder sizes are shown before downloading.
 - File rows show type and peer-reported bitrate (for example, **MP3 · 320 kbps**). **? kbps** means the peer did not supply a reliable value; Phonofetch never infers it from the filename or size.
 - Select files with checkboxes and **Download selected**, use **Download all** for the eligible files in a folder, or right-click a file. A track search downloads one selected file.
-- **MP3 320** is strict by default: it needs peer-reported 320 kbps **and** confirmed constant bitrate. **FLAC** allows `.flac` files only; **Any quality** is opt-in. Other formats are hidden under expandable excluded results and are never silently queued. Missing remote metadata cannot be verified without downloading the file.
+- Results start on **All**. After searching, filter by **FLAC**, verified **MP3 320** (peer-reported 320 kbps and CBR), or filename terms such as `-live`, `minbr:320` and `iscbr`. Unknown-bitrate files remain visible and selectable under All, but cannot be verified as MP3 320 without metadata.
 - Searches collect responses for about five seconds, then show quality-checked matches with peer-reported upload speed and free-slot status. Use **Search longer** if a fast search misses later peers; it replaces that query's results.
 - The Dashboard shows recent downloads and searches. Each search can contain multiple queries (one per line). **Downloads** lists active and finished transfers and completed-file statistics. **Clear finished list** hides only finished entries; **Clear statistics** resets the totals separately. Neither deletes files or cancels an active transfer.
+- **New Search** asks only for text. Queue one search hit or select files from an inspected folder. Automatic track or whole-album downloading is optional under **Automatic download**, with an explicit quality requirement.
 
 ## Install
 

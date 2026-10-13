@@ -14,7 +14,7 @@ export interface ParsedLine {
   duplicate?: boolean;
 }
 
-export function parseLines(input: string, type: RequestType = "track", quality: Quality = "mp3_320"): ParsedLine[] {
+export function parseLines(input: string, type: RequestType = "search", quality: Quality = "mp3_320"): ParsedLine[] {
   const seen = new Set<string>();
   return input.split(/\r?\n/).filter(line => line.trim()).map(line => {
     const queryText = line.trim();
@@ -31,7 +31,8 @@ export function parseLines(input: string, type: RequestType = "track", quality: 
 }
 
 export function parentDirectory(path: string): string {
-  return path.slice(0, Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/")));
+  const separator = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return separator === -1 ? "" : path.slice(0, separator);
 }
 
 export function fileName(path: string): string {

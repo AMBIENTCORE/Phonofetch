@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsData, DownloadStats, FolderPreview, PreviewFile, Quality, RequestType, SeedKind, SlskdConnectionState, TransferItem } from "../shared/types";
-import { normalize, parseLines, type ParsedLine } from "../server/matching";
+import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsData, DownloadStats, FolderPreview, PreviewFile, Quality, RemoteFile, RequestType, SeedKind, SlskdConnectionState, TransferItem } from "../shared/types";
+import { parseLines } from "../server/matching";
 import { audioDetails, fileFormat } from "./audio-details";
 import { autoFolderPreviews, folderKey } from "./folder-results";
+import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import "./compact.css";
 
 let csrf = "";
@@ -173,46 +174,46 @@ function DownloadsPage({ reload, action, busy }: {
 
 function NewBatch({ action, busy }: { action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
   const [input, setInput] = useState("");
-  const [defaultType, setDefaultType] = useState<RequestType>("track");
-  const [quality, setQuality] = useState<Quality>("mp3_320");
-  const [mode, setMode] = useState<"review" | "automatic">("review");
-  const [entries, setEntries] = useState<ParsedLine[] | null>(null);
+  const [automaticQuality, setAutomaticQuality] = useState<Quality>("mp3_320");
+  const [automatic, setAutomatic] = useState(false);
+  const [automaticType, setAutomaticType] = useState<"track" | "album_folder">("track");
   const [fileError, setFileError] = useState("");
-  const update = (index: number, patch: Partial<ParsedLine>) => setEntries(rows => rows?.map((row, i) => i === index ?
-    { ...row, ...patch, error: undefined, duplicate: false } : row) ?? null);
   return <><div className="page-title"><div><h1>New Search</h1><p>One query per line · up to 100 queries</p></div></div>
-    <div className="panel form-panel">
-      <label>Searches<textarea rows={4} maxLength={32768} value={input} placeholder={"ben klock subzero\nburial archangel"} onChange={event => { setInput(event.target.value); setEntries(null); }} /></label>
+    <form className="panel form-panel" onSubmit={event => { event.preventDefault(); void action(async () => {
+      const type: RequestType = automatic ? automaticType : "search";
+      const seedKind: SeedKind = automatic && automaticType === "album_folder" ? "album_title" : "track_seed";
+      const entries = parseLines(input, type, automatic ? automaticQuality : "any").map(row => ({ ...row, seedKind }));
+      if (input.length > 32768) throw new Error("Search input must be 32 KiB or less.");
+      if (!entries.length) throw new Error("Enter at least one query.");
+      if (entries.length > 100) throw new Error("A search can contain at most 100 queries.");
+      const invalid = entries.findIndex(row => row.error || row.duplicate);
+      if (invalid !== -1) throw new Error(`Query ${invalid + 1}: ${entries[invalid]!.error ??
+        "Duplicate text. Remove or edit the repeated line."}`);
+      const result = await send<{ id: string }>("/batches", {
+        originalInput: input, defaultType: type, mode: automatic ? "automatic" : "review", entries
+      });
+      location.hash = `#/search/${result.id}`;
+    }); }}>
+      <label>Searches<textarea rows={4} maxLength={32768} value={input} placeholder={"ben klock subzero\nburial archangel"} onChange={event => setInput(event.target.value)} /></label>
       <label className="upload">Text file (.txt)<input type="file" accept=".txt,text/plain" onChange={event => { const file = event.target.files?.[0]; if (!file) return;
         if (file.size > 32768 || !file.name.toLowerCase().endsWith(".txt")) { setFileError("Use a .txt file up to 32 KiB."); return; }
-        void file.text().then(text => { setInput(current => [current, text].filter(Boolean).join("\n")); setEntries(null); setFileError(""); }).catch(() => setFileError("Could not read the file."));
+        void file.text().then(text => { setInput(current => [current, text].filter(Boolean).join("\n")); setFileError(""); }).catch(() => setFileError("Could not read the file."));
       }} /></label><p role="alert">{fileError}</p>
-      <div className="form-grid"><label>Default request type<select value={defaultType} onChange={event => setDefaultType(event.target.value as RequestType)}>
-        <option value="track">Individual track</option><option value="album_folder">Album / folder</option></select></label>
-        <label>Required quality<select value={quality} onChange={event => setQuality(event.target.value as Quality)}>
-          <option value="mp3_320">MP3 320 (strict)</option><option value="flac">FLAC</option><option value="any">Any quality (explicit)</option></select></label>
-        <label>Processing<select value={mode} onChange={event => setMode(event.target.value as "review" | "automatic")}>
-          <option value="review">Review before queueing</option><option value="automatic">Automatically queue high-confidence matches</option></select></label></div>
-      <button onClick={() => setEntries(parseLines(input, defaultType, quality))}>Review list</button>
-    </div>
-    {entries && <section className="panel review-panel"><div className="panel-heading"><h2>Review queries <span className="count-pill">{entries.length}</span></h2><span>Edit or remove invalid lines</span></div>
-      {!entries.length && <p className="empty">Add at least one search line.</p>}
-      {entries.map((row, index) => <div className="entry" key={index}><div className="entry-label"><span className="entry-number">{String(index + 1).padStart(2, "0")}</span> {row.original}</div>
-        <div className="entry-fields"><label className="query-field">Search text<input value={row.queryText} maxLength={256} onChange={event => update(index, { queryText: event.target.value })} /></label>
-          <label>Type<select value={row.type} onChange={event => update(index, { type: event.target.value as RequestType, seedKind: "track_seed" })}>
-            <option value="track">Track</option><option value="album_folder">Album / folder</option></select></label>
-          {row.type === "album_folder" && <label>Search for<select value={row.seedKind} onChange={event => update(index, { seedKind: event.target.value as SeedKind })}>
-            <option value="track_seed">Track inside folder</option><option value="album_title">Album title</option></select></label>}
-          <label>Quality<select value={row.quality} onChange={event => update(index, { quality: event.target.value as Quality })}>
-            <option value="mp3_320">MP3 320</option><option value="flac">FLAC</option><option value="any">Any quality</option></select></label>
-          <button className="quiet" onClick={() => setEntries(rows => rows?.filter((_, i) => i !== index) ?? null)}>Remove</button></div>
-        {row.error && <span className="warn">{row.error}</span>}{row.duplicate && <span className="warn">Duplicate input — remove or edit before submitting.</span>}
-      </div>)}
-      <button disabled={busy || !entries.length || entries.some(row => !normalize(row.queryText) || row.error || row.duplicate)} onClick={() => void action(async () => {
-        const result = await send<{ id: string }>("/batches", { originalInput: input, defaultType, mode, entries });
-        location.hash = `#/search/${result.id}`;
-      })}>Start search</button>
-      <p className="hint">Strict quality never falls back automatically. Album folders require inspecting each file before queueing.</p></section>}</>;
+      <details className="search-advanced"><summary>Automatic download (optional)</summary>
+        <label className="check"><input type="checkbox" checked={automatic} onChange={event => setAutomatic(event.target.checked)} />
+          Queue high-confidence matches without review</label>
+        {automatic && <label>Download<select value={automaticType}
+          onChange={event => setAutomaticType(event.target.value as "track" | "album_folder")}>
+          <option value="track">One track</option><option value="album_folder">Matched album folder</option>
+        </select></label>}
+        {automatic && <label>Required quality<select value={automaticQuality}
+          onChange={event => setAutomaticQuality(event.target.value as Quality)}>
+          <option value="mp3_320">MP3 320 (strict)</option><option value="flac">FLAC</option>
+          <option value="any">Any quality (explicit)</option>
+        </select></label>}
+      </details>
+      <button disabled={busy}>Start search</button>
+    </form></>;
 }
 
 function BatchPage({ id, page, reload, action, busy }: { id: string; page: string; reload: number; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
@@ -277,7 +278,14 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
 }): React.ReactElement {
   const [recursive, setRecursive] = useState(false);
   const [retryQuality, setRetryQuality] = useState<Quality>(request.quality);
+  const [preset, setPreset] = useState<ResultPreset>("all");
+  const [filterText, setFilterText] = useState("");
   const [trackMenu, setTrackMenu] = useState<{ candidateId: string; x: number; y: number } | null>(null);
+  const parsedFilter = parseResultFilter(filterText);
+  const matches = (file: Pick<RemoteFile, "path" | "size" | "metadata">): boolean =>
+    parsedFilter.value !== null && matchesResult(file, preset, parsedFilter.value);
+  const oldQualityLimit = request.quality !== "any" && ["review", "no_results"].includes(request.status) &&
+    !request.transfers.length;
   const grouped = new Map<string, typeof request.candidates>();
   for (const candidate of request.candidates) {
     const key = folderKey(request.id, candidate.username, candidate.directory, recursive);
@@ -291,66 +299,90 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
     const [key, hits] = entry;
     const preview = request.previews.find(item =>
       folderKey(request.id, item.username, item.directory, item.recursive) === key);
-    const groups = preview ? preview.eligible_count > 0 ? matchingFolders : otherFolders :
-      hits.some(hit => hit.eligible) ? matchingFolders : otherFolders;
+    if (!hits.some(matches) && !preview?.files.some(matches)) continue;
+    const groups = preset === "all" || request.type === "search" ||
+      (preview ? preview.files.some(file => matches(file) && file.eligible) : hits.some(hit => matches(hit) && hit.eligible))
+      ? matchingFolders : otherFolders;
     const username = hits[0]!.username;
     const folders = groups.get(username) ?? [];
     folders.push(entry);
     groups.set(username, folders);
   }
   const matchingCount = [...matchingFolders.values()].reduce((count, folders) => count + folders.length, 0);
-  const eligibleCount = request.candidates.filter(candidate => candidate.eligible).length;
+  const otherCount = [...otherFolders.values()].reduce((count, folders) => count + folders.length, 0);
+  const visibleCandidates = request.candidates.filter(matches);
+  const eligibleCount = visibleCandidates.filter(candidate => candidate.eligible).length;
   const canInspect = ["review", "no_results"].includes(request.status) && !request.jobs.length;
   const queueTrack = (candidateId: string) => {
     const candidate = request.candidates.find(item => item.id === candidateId);
-    if (candidate?.eligible && request.status === "review" && !request.transfers.length && !busy &&
+    if (candidate?.eligible && matches(candidate) && request.status === "review" && !request.transfers.length && !busy &&
       confirm(`Queue exactly this file?\n${candidate.path}`))
       void action(() => send(`/requests/${request.id}/select`, { candidateId }));
   };
   return <section className="panel request" id={`request-${request.id}`}><div className="panel-heading">
     <div>{!singleQuery && <h2>{request.query_text}</h2>}
-      <small>{request.type === "track" ? "Track" : "Folder"} · {{
-        mp3_320: "MP3 320", flac: "FLAC", any: "Any quality"
-      }[request.quality]} {request.status !== "review" &&
+      <small>{request.type === "track" ? "Track" : request.type === "search" ? "Files & folders" : "Folder"}
+        {request.type !== "search" && ` · ${{ mp3_320: "MP3 320", flac: "FLAC", any: "Any quality" }[request.quality]}`}
+        {request.status !== "review" && !(oldQualityLimit && request.status === "no_results") &&
         <span className={`status ${request.status}`}>{request.status.replace("_", " ")}</span>}</small></div></div>
-    {request.error && <p className="warn" role="alert">{request.error}</p>}
+    {request.error && !(oldQualityLimit && request.error === "No files met the selected quality requirements") &&
+      <p className="warn" role="alert">{request.error}</p>}
     {request.status === "searching" && <p>{request.search_stop_requested_at ? "Preparing results…" :
       `Searching… ${request.search_file_count} files · ${request.search_response_count} responses`}</p>}
-    {request.status === "no_results" && !request.error && <p>No qualifying files returned by Soulseek.</p>}
+    {oldQualityLimit && <p className="service-warning">This older search restricted quality before displaying results.
+      <button className="secondary" disabled={busy} onClick={() => void action(() =>
+        send(`/requests/${request.id}/show-all`))}>Show all results without searching again</button></p>}
+    {request.status === "no_results" && !request.candidates.length && !request.error && <p>No files returned by Soulseek.</p>}
+    {request.candidates.length > 0 && <div className="result-filters">
+      <div role="group" aria-label="Filter results" className="filter-presets">
+        {([["all", "All"], ["flac", "FLAC"], ["mp3_320", "MP3 320"]] as const).map(([value, label]) =>
+          <button key={value} className={preset === value ? "current" : "secondary"} aria-pressed={preset === value}
+            onClick={() => setPreset(value)}>{label}</button>)}
+      </div>
+      <label>Filter files<input value={filterText} onChange={event => setFilterText(event.target.value)}
+        placeholder="words -word minbr:320 iscbr" /></label>
+      {parsedFilter.error && <small className="warn" role="alert">{parsedFilter.error}</small>}
+      {preset === "mp3_320" && <small>Only peer-reported 320 kbps CBR. Unknown bitrate stays under All.</small>}
+    </div>}
     {["failed", "no_results", "review", "cancelled"].includes(request.status) && request.transfers.length === 0 &&
       <details className="retry-options"><summary>{request.status === "review" ? "Search options" : "Retry search"}</summary>
-      <div className="retry"><label>Quality <select value={retryQuality} onChange={event => setRetryQuality(event.target.value as Quality)}>
+      <div className="retry">{request.type !== "search" && <label>Old quality rule<select value={retryQuality} onChange={event => setRetryQuality(event.target.value as Quality)}>
         <option value="mp3_320">MP3 320</option><option value="flac">FLAC</option><option value="any">Any quality</option></select></label>
-        <button className="secondary" disabled={busy} onClick={() => void action(() => send(`/requests/${request.id}/retry`, { quality: retryQuality }))}>Search again (fast)</button>
+        }<button className="secondary" disabled={busy} onClick={() => void action(() => send(`/requests/${request.id}/retry`,
+          { quality: request.type === "search" ? "any" : retryQuality }))}>Search again (fast)</button>
         <button className="secondary" disabled={busy} onClick={() => {
           if (!request.candidates.length || confirm("A longer search replaces these results. Continue?"))
-            void action(() => send(`/requests/${request.id}/retry`, { quality: retryQuality, longer: true }));
+            void action(() => send(`/requests/${request.id}/retry`,
+              { quality: request.type === "search" ? "any" : retryQuality, longer: true }));
         }}>Search longer</button></div></details>}
-    {request.type === "track" && request.candidates.length > 0 && <div><h3>Files ({eligibleCount})</h3>
-      {eligibleCount > 0 ? <TrackResultsTable candidates={request.candidates.filter(candidate => candidate.eligible)}
+    {request.type === "track" && request.candidates.length > 0 && <div><h3>Files ({visibleCandidates.length})</h3>
+      {eligibleCount > 0 ? <TrackResultsTable candidates={visibleCandidates.filter(candidate => candidate.eligible)}
         canQueue={request.status === "review" && !request.transfers.length && !busy} queueTrack={queueTrack}
         openMenu={(candidateId, x, y) => setTrackMenu({ candidateId, x, y })} /> :
-        <p>No files met the selected quality. Expand excluded results for details.</p>}
-      {eligibleCount < request.candidates.length && <details className="excluded-results">
-        <summary>Show excluded files ({request.candidates.length - eligibleCount})</summary>
-        <TrackResultsTable candidates={request.candidates.filter(candidate => !candidate.eligible)}
+        visibleCandidates.length > 0 && <p>Older quality rule blocked these files. Use Show all results above.</p>}
+      {eligibleCount < visibleCandidates.length && <details className="excluded-results">
+        <summary>Blocked by old quality rule ({visibleCandidates.length - eligibleCount})</summary>
+        <TrackResultsTable candidates={visibleCandidates.filter(candidate => !candidate.eligible)}
           canQueue={false} queueTrack={queueTrack} />
       </details>}
       {trackMenu && request.status === "review" && !request.transfers.length && !busy &&
         <ContextMenu x={trackMenu.x} y={trackMenu.y} label="Download file"
         onDownload={() => queueTrack(trackMenu.candidateId)} onClose={() => setTrackMenu(null)} />}
     </div>}
-    {request.type === "album_folder" && grouped.size > 0 && <div><h3>Folders ({grouped.size})</h3>
+    {(request.type === "album_folder" || request.type === "search") && request.candidates.length > 0 && <div>
+      <h3>Folders ({matchingCount + otherCount})</h3>
       <label className="check"><input type="checkbox" checked={recursive} onChange={event => setRecursive(event.target.checked)} /> Include subfolders</label>
       {matchingCount > 0 ? <FolderCandidateList request={request} peers={matchingFolders} recursive={recursive}
         canInspect={canInspect} busy={busy} inspecting={inspecting} previewErrors={previewErrors}
-        clearPreviewError={clearPreviewError} action={action} /> :
-        <p>No qualifying folder is visible yet. Other folders can be inspected below.</p>}
-      {grouped.size > matchingCount && <details className="excluded-results">
-        <summary>Other folders ({grouped.size - matchingCount})</summary>
+        clearPreviewError={clearPreviewError} action={action} queueTrack={queueTrack}
+        matches={matches} filterKey={`${preset}:${filterText}`} /> :
+        <p>{parsedFilter.error ? "Fix the filter above to see results." : "No folders match this filter. Select All to see every result."}</p>}
+      {otherCount > 0 && <details className="excluded-results">
+        <summary>Other folders ({otherCount})</summary>
         <FolderCandidateList request={request} peers={otherFolders} recursive={recursive}
           canInspect={canInspect} busy={busy} inspecting={inspecting} previewErrors={previewErrors}
-          clearPreviewError={clearPreviewError} action={action} />
+          clearPreviewError={clearPreviewError} action={action} queueTrack={queueTrack}
+          matches={matches} filterKey={`${preset}:${filterText}`} />
       </details>}
     </div>}
     {request.jobs.map(job => <div key={job.id} className="job"><h3>Folder job · {job.status}</h3>
@@ -364,37 +396,51 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   </section>;
 }
 
-function FolderCandidateList({ request, peers, recursive, canInspect, busy, inspecting, previewErrors, clearPreviewError, action }: {
+function FolderCandidateList({ request, peers, recursive, canInspect, busy, inspecting, previewErrors, clearPreviewError,
+  action, queueTrack, matches, filterKey }: {
   request: RequestDetail; peers: Map<string, Array<[string, Candidate[]]>>; recursive: boolean;
   canInspect: boolean; busy: boolean; inspecting: ReadonlySet<string>;
   previewErrors: Record<string, string>; clearPreviewError: (key: string) => void;
-  action: (fn: () => Promise<unknown>) => Promise<void>;
+  action: (fn: () => Promise<unknown>) => Promise<void>; queueTrack: (candidateId: string) => void;
+  matches: (file: Pick<RemoteFile, "path" | "size" | "metadata">) => boolean; filterKey: string;
 }): React.ReactElement {
   return <>{[...peers].sort((a, b) => peerOrder(a[1][0]?.[1][0], b[1][0]?.[1][0])).map(([username, folders]) => <details className="peer-group" open key={username}>
     <summary>{username}{folders.length > 1 ? ` (${folders.length})` : ""} · {peerDetails(folders[0]?.[1][0])}</summary>{folders.map(([key, hits]) => {
       const candidate = hits[0]!;
       const preview = request.previews.find(item =>
         folderKey(request.id, item.username, item.directory, item.recursive) === key);
-      const hitBytes = hits.reduce((total, file) => total + file.size, 0);
+      const visibleHits = hits.filter(matches);
+      const visibleFiles = preview?.files.filter(matches) ?? [];
+      const hitBytes = visibleHits.reduce((total, file) => total + file.size, 0);
       return <div className="folder-candidate" key={key}><div className="candidate">
-        <span><strong>{candidate.directory}</strong><small title={candidate.explanation}>Match {Math.round(candidate.score * 100)}%</small></span>
-        {canInspect && <button className="quiet" disabled={busy || inspecting.has(key)} onClick={() => void action(async () => {
+        <span><strong>{candidate.directory || "Shared files"}</strong><small title={candidate.explanation}>Match {Math.round(candidate.score * 100)}%</small></span>
+        {canInspect && candidate.directory && <button className="quiet" disabled={busy || inspecting.has(key)} onClick={() => void action(async () => {
           await send<FolderPreview>(`/requests/${request.id}/preview`, { candidateId: candidate.id, recursive });
           clearPreviewError(key);
         })}>{inspecting.has(key) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}
       </div>
-      {preview ? <Preview key={preview.id} preview={preview} busy={busy} canQueue={canInspect}
+      {preview && visibleFiles.length > 0 ? <Preview key={`${preview.id}:${filterKey}`} preview={preview}
+        visibleFiles={visibleFiles} filterActive={filterKey !== "all:"} busy={busy} canQueue={canInspect}
         confirmPreview={paths => {
-          const count = paths?.length ?? preview.eligible_count;
+          const count = paths?.length ?? visibleFiles.filter(file => file.eligible).length;
           if (confirm(`Queue ${count} files from ${preview.username}\\${preview.directory}?${preview.excluded_count || count < preview.eligible_count ?
             ` Partial folder: ${preview.excluded_count} quality-excluded and ${preview.eligible_count - count} unselected.` : ""}`))
             void action(() => send(`/requests/${request.id}/queue-folder`, { previewId: preview.id, selectedPaths: paths }));
         }} /> :
         <div className="folder-search-hits">
-          <small>Search hits only · {hits.length} file{hits.length === 1 ? "" : "s"} · {bytes(hitBytes)}</small>
-          {hits.map(file => <div className="folder-hit" key={file.id}><span>{basename(file.path)}</span>
+          <small>Search hits only · {visibleHits.length} file{visibleHits.length === 1 ? "" : "s"} · {bytes(hitBytes)}</small>
+          {visibleHits.map(file => {
+            const canQueueHit = request.type === "search" && request.status === "review" &&
+              !request.transfers.length && !busy && file.eligible;
+            return <div className="folder-hit" key={file.id} onContextMenu={event => {
+              if (!canQueueHit) return;
+              event.preventDefault();
+              queueTrack(file.id);
+            }}><span className="folder-hit-name">{basename(file.path)}
+              {canQueueHit && <button className="quiet" onClick={() => queueTrack(file.id)}>Queue file</button>}</span>
             <span className="folder-file-format" title={audioDetails(file.metadata, file.path)}>
-              {fileFormat(file.metadata, file.path)}</span><span className="folder-file-size">{bytes(file.size)}</span></div>)}
+              {fileFormat(file.metadata, file.path)}</span><span className="folder-file-size">{bytes(file.size)}</span></div>;
+          })}
         </div>}
       {previewErrors[key] && !preview && <small role="alert" className="warn">Inspection failed: {previewErrors[key]}. Select Inspect to retry.</small>}
       </div>;
@@ -532,15 +578,16 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue }
   return <div className="folder-tree-scroll">{render(root)}</div>;
 }
 
-function Preview({ preview, busy, canQueue, confirmPreview }: {
-  preview: FolderPreview; busy: boolean; canQueue: boolean; confirmPreview: (paths?: string[]) => void;
+function Preview({ preview, visibleFiles, filterActive, busy, canQueue, confirmPreview }: {
+  preview: FolderPreview; visibleFiles: PreviewFile[]; filterActive: boolean;
+  busy: boolean; canQueue: boolean; confirmPreview: (paths?: string[]) => void;
 }): React.ReactElement {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const expired = Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
   const canDownload = canQueue && !busy && !expired;
-  const eligible = preview.files.filter(file => file.eligible);
-  const excluded = preview.files.filter(file => !file.eligible);
+  const eligible = visibleFiles.filter(file => file.eligible);
+  const excluded = visibleFiles.filter(file => !file.eligible);
   const selectedFiles = eligible.filter(file => selected.has(file.path));
   const selectedBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
   const chooseFile = (path: string) => setSelected(current => {
@@ -558,14 +605,16 @@ function Preview({ preview, busy, canQueue, confirmPreview }: {
   };
   const selectedPaths = selectedFiles.map(file => file.path);
   return <div className="preview folder-preview">
-    <div className="folder-summary"><span>{preview.files.length} files{preview.recursive ? " incl. subfolders" : ""}
-      {preview.excluded_count > 0 && ` · ${preview.eligible_count} eligible · ${preview.excluded_count} excluded`}</span>
-      <strong>{bytes(preview.audio_bytes)}{preview.excluded_count > 0 && ` · eligible ${bytes(preview.eligible_bytes)}`}</strong></div>
+    <div className="folder-summary"><span>{visibleFiles.length}{filterActive && ` of ${preview.files.length}`} files
+      {preview.recursive ? " incl. subfolders" : ""}
+      {excluded.length > 0 && ` · ${eligible.length} selectable · ${excluded.length} blocked`}</span>
+      <strong>{bytes(visibleFiles.reduce((sum, file) => sum + file.size, 0))}
+        {filterActive && ` shown · ${bytes(preview.audio_bytes)} folder`}</strong></div>
     {eligible.length ? <>
       <div className="folder-tree-columns"><span>File</span><span>Type / bitrate</span><span>Size</span></div>
       <FolderTree preview={preview} files={eligible} selected={selected} onSelect={chooseFile}
         onFileMenu={openFileMenu} canQueue={canDownload} />
-    </> : <small>No files in this folder meet the selected quality.</small>}
+    </> : <small>These files are blocked by the old quality rule. Use Show all results.</small>}
     {excluded.length > 0 && <details className="excluded-results">
       <summary>Excluded ({excluded.length}) · {bytes(preview.audio_bytes - preview.eligible_bytes)}</summary>
       <FolderTree preview={preview} files={excluded} selected={selected} onSelect={chooseFile}
@@ -576,7 +625,7 @@ function Preview({ preview, busy, canQueue, confirmPreview }: {
       {selected.size > 0 && <button className="secondary" disabled={!canDownload}
         onClick={() => setSelected(new Set())}>Clear selection</button>}
       <button disabled={!canDownload || (selected.size > 0 ? !selectedFiles.length : !eligible.length)}
-        onClick={() => confirmPreview(selected.size ? selectedPaths : undefined)}>
+        onClick={() => confirmPreview(selected.size ? selectedPaths : eligible.map(file => file.path))}>
         {selected.size ? `Download selected (${selectedFiles.length}, ${bytes(selectedBytes)})` : `Download all (${eligible.length})`}
       </button>
     </div>}
@@ -601,7 +650,10 @@ function ActivityList({ events }: { events: Activity[] }): React.ReactElement {
   if (!events.length) return <p className="empty">No activity yet.</p>;
   return <div className="activity-list">{events.map(event => <div className="event" key={event.id}>
     <span className={`indicator ${event.severity}`} aria-label={event.severity} /><div><strong>{event.message}</strong>
-      <small><span className="severity">{event.severity}</span>{" "}{time(event.created_at)} · {event.category === "batch" ? "search" : event.category} · {event.event_type}
+      <small><span className="severity">{event.severity}</span>{" "}{time(event.created_at)} · {
+        event.category === "quality" ? "file result" : event.category === "batch" ? "search" : event.category
+      } · {event.event_type === "folder_file_excluded" ? "blocked by old quality rule" :
+        event.event_type.replaceAll("_", " ")}
         {event.batch_id && <> · <a href={`#/search/${event.batch_id}${event.request_id ? `?request=${event.request_id}` : ""}`}>{event.request_id ? "Query" : "Search"}</a></>}</small></div></div>)}</div>;
 }
 

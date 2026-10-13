@@ -21,8 +21,10 @@ export function autoFolderPreviews(requests: readonly PreviewRequest[], attempte
     .map(preview => folderKey(request.id, preview.username, preview.directory, false))));
   const groups = new Map<string, { requestId: string; candidateId: string; score: number; eligible: boolean }>();
   for (const request of requests) {
-    if (request.type !== "album_folder" || !["review", "no_results"].includes(request.status) || request.jobs.length) continue;
+    if (!["album_folder", "search"].includes(request.type) ||
+      !["review", "no_results"].includes(request.status) || request.jobs.length) continue;
     for (const candidate of request.candidates) {
+      if (!candidate.directory) continue;
       const key = folderKey(request.id, candidate.username, candidate.directory, false);
       if (known.has(key) || attempted.has(key)) continue;
       const existing = groups.get(key);

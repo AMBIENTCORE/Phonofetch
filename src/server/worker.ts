@@ -202,18 +202,16 @@ export class Worker {
         const hasEligible = candidates.some(c => c.eligible);
         this.store.run("UPDATE requests SET status=?,error=?,search_file_count=?,search_response_count=?,updated_at=? WHERE id=?",
           hasEligible ? "review" : "no_results",
-          hasEligible ? null : candidates.length ? "No files met the selected quality requirements" : "Soulseek returned no files for this text search",
+          hasEligible ? null : candidates.length ?
+            request.quality === "any" ? "No supported audio files in the search results" :
+              "No files met the selected quality requirements" :
+            "Soulseek returned no files for this text search",
           snapshot.reportedFileCount, snapshot.reportedResponseCount, new Date().toISOString(), request.id);
         this.store.event("info", "search", "completed",
           `Search ${snapshot.state}: ${snapshot.results.length} files returned, ${candidates.length} distinct, ${candidates.filter(c => c.eligible).length} eligible`,
           { batchId: request.batch_id, requestId: request.id },
           { searchId: request.search_id, reportedFileCount: snapshot.reportedFileCount, reportedResponseCount: snapshot.reportedResponseCount });
-        for (const candidate of candidates)
-          this.store.event(candidate.eligible ? "info" : "warning", "quality",
-            candidate.eligible ? "candidate_ranked" : "candidate_excluded",
-            `${candidate.path}: ${candidate.reason}; ${candidate.explanation}`,
-            { batchId: request.batch_id, requestId: request.id }, { score: candidate.score });
-        if (request.type === "album_folder") {
+        if (request.type === "album_folder" || request.type === "search") {
           const folders = new Map<string, Candidate>();
           for (const candidate of candidates) {
             const key = `${candidate.username}\0${candidate.directory}`;
@@ -246,6 +244,10 @@ export class Worker {
       } else this.store.event("warning", "automatic", "left_for_review", "Track confidence or uniqueness below automatic threshold",
         { batchId: request.batch_id, requestId: request.id });
       return;
+    }
+    if (request.type === "search") {
+      this.store.event("warning", "automatic", "left_for_review", "Manual search requires explicit file or folder selection",
+        { batchId: request.batch_id, requestId: request.id }); return;
     }
     if (request.seed_kind === "track_seed") {
       this.store.event("warning", "automatic", "left_for_review", "Track-seeded folder requires manual album confirmation",
