@@ -16,6 +16,7 @@ Phonofetch is a self-hosted, phone-friendly search and download manager for an *
 - Searches collect responses for about five seconds, then show matches with peer-reported upload speed and free-slot status. Manual downloads are not restricted by format or bitrate; filters only change which files are shown, not what can be selected. Automatic downloads still enforce the chosen audio quality. Use **Search longer** if a fast search misses later peers; it replaces that query's results.
 - The Dashboard shows recent downloads and searches, with a search box that opens the **Search** tab with the query ready to review. Each search can contain multiple queries (one per line). **Downloads** groups active and finished transfers by peer and folder, with inline progress, expand/collapse, and per-file actions. Search results show folder-job progress without duplicating the transfer list. **Clear finished list** hides only finished entries; **Clear statistics** resets the totals separately. Neither deletes files or cancels an active transfer.
 - **Search** asks only for text. Queue one search hit or select files from an inspected folder. Automatic track or whole-album downloading is optional under **Automatic download**, with an explicit quality requirement.
+- Use the **Skin** selector to choose Original, Iridescent accents (the current dark surfaces with colors inspired by the Phonofetch artwork), or Liquid chrome (a fuller dark teal/violet reskin). The choice is saved in this browser and never changes downloads or server settings.
 
 ## Install
 
