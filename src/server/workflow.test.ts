@@ -44,6 +44,7 @@ function setup() {
     check: vi.fn(async () => {}),
     startSearch: vi.fn(async () => "search-1"),
     getSearch: vi.fn(async () => searchSnapshot),
+    stopSearch: vi.fn(async () => {}),
     browse: vi.fn(async () => folderFiles),
     enqueue: vi.fn(async (username, file, batchId) => {
       const id = `transfer-${transfers.length + 1}`;
@@ -89,17 +90,94 @@ describe("authenticated mixed-batch workflow", () => {
       mode: "review", entries: [{ ...entries[0], queryText: "burial archangel" }]
     });
     expect(created.status).toBe(201);
-    expect(created.body).toMatchObject({ number: 1, name: expect.stringMatching(/^Batch #1 \[\d{4}-\d{2}-\d{2}\]$/) });
+    expect(created.body).toMatchObject({ number: 1, name: "Search #1 · burial archangel" });
     const detail = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body;
     expect(detail.requests).toHaveLength(1);
     expect(detail.requests[0]).toMatchObject({ query_text: "burial archangel", original_input: "Burial - Archangel" });
+    store.run("UPDATE batches SET name=? WHERE id=?", "Batch #1 [2026-10-12]", created.body.id);
+    expect((await request(app).get("/api/dashboard").set(auth)).body.batches[0].name)
+      .toBe("Search #1 · burial archangel");
+    expect((await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.batch.name)
+      .toBe("Search #1 · burial archangel");
     const second = await request(app).post("/api/batches").set(auth).send({
       originalInput: "Ben Klock Subzero", defaultType: "track", mode: "review",
       entries: [{ original: "Ben Klock Subzero", queryText: "Ben Klock Subzero", type: "track",
         seedKind: "track_seed", quality: "flac" }]
     });
-    expect(second.body).toMatchObject({ number: 2, name: expect.stringMatching(/^Batch #2 \[\d{4}-\d{2}-\d{2}\]$/) });
+    expect(second.body).toMatchObject({ number: 2, name: "Search #2 · Ben Klock Subzero" });
     expect(store.all("SELECT number FROM batches")).toHaveLength(2);
+  });
+
+  it("separately clears finished-list entries and completed-byte statistics without touching active transfers", async () => {
+    const { app, worker, transfers, port, store, config } = setup();
+    const auth = await login(app);
+    expect((await request(app).get("/api/downloads").set(headers)).status).toBe(401);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[1]!.original, defaultType: "album_folder", mode: "review", entries: [entries[1]]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const preview = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id, recursive: false });
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: preview.body.id })).status).toBe(202);
+    await worker.runOnce();
+    expect(transfers).toHaveLength(2);
+    transfers[0]!.status = "completed"; transfers[0]!.transferred = 100;
+    transfers[1]!.status = "active"; transfers[1]!.transferred = 25;
+    await worker.runOnce();
+    let downloads = (await request(app).get("/api/downloads").set(auth)).body;
+    expect(downloads).toMatchObject({
+      active_total: 1, finished_total: 1,
+      stats: { completed_count: 1, completed_bytes: 100, active_count: 1, active_transferred_bytes: 25 }
+    });
+    expect(downloads.finished[0]).toMatchObject({ batch_number: 1, query_text: "Burial - Untrue" });
+    expect((await request(app).post("/api/downloads/clear").set({ ...headers, Cookie: auth.Cookie })).status).toBe(403);
+    expect((await request(app).post("/api/downloads/clear").set(auth).send({})).body).toEqual({ cleared: 1 });
+    downloads = (await request(app).get("/api/downloads").set(auth)).body;
+    expect(downloads).toMatchObject({ active_total: 1, finished_total: 0,
+      stats: { completed_count: 1, completed_bytes: 100, active_count: 1 } });
+    expect(store.batchDetail(created.body.id)?.requests[0]?.transfers).toHaveLength(2);
+    expect(port.cancel).not.toHaveBeenCalled();
+    expect((await request(app).post("/api/downloads/stats/clear").set(auth).send({})).body.stats)
+      .toMatchObject({ completed_count: 0, completed_bytes: 0, active_count: 1, active_transferred_bytes: 25 });
+    const reopened = new Store(config.DATABASE_PATH);
+    expect(reopened.downloads(10, 10)).toMatchObject({
+      active_total: 1, finished_total: 0, stats: { completed_count: 0, completed_bytes: 0 }
+    });
+    reopened.close();
+    transfers[1]!.status = "completed"; transfers[1]!.transferred = 100;
+    await worker.runOnce();
+    downloads = (await request(app).get("/api/downloads?activeLimit=1&finishedLimit=1").set(auth)).body;
+    expect(downloads).toMatchObject({ active_total: 0, finished_total: 1,
+      stats: { completed_count: 1, completed_bytes: 100, active_count: 0 } });
+    expect(downloads.finished).toHaveLength(1);
+    expect((await request(app).get("/api/dashboard").set(auth)).body.downloads.stats.completed_bytes).toBe(100);
+    await request(app).post("/api/downloads/stats/clear").set(auth).send({});
+    downloads = (await request(app).get("/api/downloads").set(auth)).body;
+    expect(downloads).toMatchObject({ finished_total: 1, stats: { completed_count: 0, completed_bytes: 0 } });
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores a hidden failed download to the list when it is explicitly retried", async () => {
+    const { app, worker, transfers } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[0]!.original, defaultType: "track", mode: "review", entries: [entries[0]]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect((await request(app).post(`/api/requests/${item.id}/select`).set(auth)
+      .send({ candidateId: item.candidates[0].id })).status).toBe(202);
+    await worker.runOnce();
+    transfers[0]!.status = "failed";
+    await worker.runOnce();
+    expect((await request(app).post("/api/downloads/clear").set(auth).send({})).body.cleared).toBe(1);
+    const transferId = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0].transfers[0].id;
+    expect((await request(app).post(`/api/transfers/${transferId}/retry`)
+      .set(auth).send({})).status).toBe(202);
+    expect((await request(app).get("/api/downloads").set(auth)).body.active_total).toBe(1);
   });
 
   it("protects mutations and stores per-request overrides and activity across restart", async () => {
@@ -117,7 +195,7 @@ describe("authenticated mixed-batch workflow", () => {
     const id = created.body.id as string;
     let detail = (await request(app).get(`/api/batches/${id}`).set(auth)).body;
     expect(detail.requests.map((item: MusicRequest) => [item.type, item.quality])).toEqual([["track", "flac"], ["album_folder", "flac"]]);
-    expect(detail.batch.name).toMatch(/^Batch #1 \[\d{4}-\d{2}-\d{2}\]$/);
+    expect(detail.batch.name).toBe("Search #1 · Burial - Archangel (+1 more)");
     expect(detail.batch.counts).toEqual({ pending: 2 });
     await worker.runOnce();
     detail = (await request(app).get(`/api/batches/${id}`).set(auth)).body;
@@ -241,6 +319,53 @@ describe("authenticated mixed-batch workflow", () => {
     expect(result.jobs[0]).toMatchObject({ excluded_count: 0, selected_count: 1, unselected_count: 1 });
   });
 
+  it("uses exact search-hit metadata when the peer omits it in a folder browse", async () => {
+    const { app, worker, folderFiles, port, setSnapshot } = setup();
+    const searched = { ...folderFiles[2]!, path: folderFiles[2]!.path.replace(/\\/g, "/"),
+      directory: folderFiles[2]!.directory.replace(/\\/g, "/"),
+      metadata: { ...unknownMetadata(), bitrate: 320, vbr: false } };
+    setSnapshot({ id: "search-1", state: "Completed", finished: true,
+      reportedFileCount: 1, reportedResponseCount: 1, results: [searched] });
+    const auth = await login(app);
+    const entry = { ...entries[1]!, original: "Burial Song", queryText: "Burial Song", quality: "mp3_320" };
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entry.original, defaultType: "album_folder", mode: "review", entries: [entry]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const inspected = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(inspected.status).toBe(200);
+    expect(inspected.body).toMatchObject({ eligible_count: 1, excluded_count: 2 });
+    const mp3 = inspected.body.files.find((file: { path: string }) => file.path.endsWith(".mp3"));
+    expect(mp3).toMatchObject({ eligible: true, metadata: { bitrate: 320, vbr: false } });
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: inspected.body.id, selectedPaths: [mp3.path] })).status).toBe(202);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledTimes(1);
+    expect(folderFiles[2]!.metadata.bitrate).toBeNull();
+  });
+
+  it("excludes a file when search and browse reports contradict each other", async () => {
+    const { app, worker, folderFiles, setSnapshot } = setup();
+    folderFiles[2]!.metadata = { ...unknownMetadata(), bitrate: 192, vbr: true };
+    setSnapshot({ id: "search-1", state: "Completed", finished: true,
+      reportedFileCount: 1, reportedResponseCount: 1,
+      results: [{ ...folderFiles[2]!, metadata: { ...unknownMetadata(), bitrate: 320, vbr: false } }] });
+    const auth = await login(app);
+    const entry = { ...entries[1]!, original: "Burial Song", queryText: "Burial Song", quality: "mp3_320" };
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entry.original, defaultType: "album_folder", mode: "review", entries: [entry]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const inspected = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    const mp3 = inspected.body.files.find((file: { path: string }) => file.path.endsWith(".mp3"));
+    expect(mp3).toMatchObject({ eligible: false, metadata: { bitrate: null, vbr: null } });
+    expect(inspected.body.eligible_count).toBe(0);
+  });
+
   it("rejects changed remote folders and limits recursive scope", async () => {
     const { app, store, worker, folderFiles } = setup();
     const auth = await login(app);
@@ -274,9 +399,14 @@ describe("authenticated mixed-batch workflow", () => {
     expect((await request(app).post(`/api/requests/${item.id}/retry`).set(auth).send({ quality: "flac" })).status).toBe(200);
     await worker.runOnce();
     item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
-    expect(item).toMatchObject({ status: "review", quality: "flac" });
+    expect(item).toMatchObject({ status: "review", quality: "flac", search_window_ms: 5000 });
     expect(item.candidates[0].eligible).toBe(true);
     expect(store.activity({ requestId: item.id, category: "search", search: "Retry requested" })).toHaveLength(1);
+    expect((await request(app).post(`/api/requests/${item.id}/retry`).set(auth)
+      .send({ quality: "flac", longer: true })).status).toBe(200);
+    expect(store.get<MusicRequest>("SELECT * FROM requests WHERE id=?", item.id)?.search_window_ms).toBe(40000);
+    await worker.runOnce();
+    expect(port.startSearch).toHaveBeenLastCalledWith("burial archangel", 40000);
   });
 
   it("automatically queues only confident tracks and leaves partial folders for review", async () => {

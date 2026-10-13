@@ -21,8 +21,9 @@ export interface RemoteTransfer {
 
 export interface SlskdPort {
   check(): Promise<void>;
-  startSearch(query: string): Promise<string>;
+  startSearch(query: string, idleTimeoutMs?: number): Promise<string>;
   getSearch(id: string): Promise<SearchSnapshot>;
+  stopSearch(id: string): Promise<void>;
   browse(username: string, directory: string, recursive: boolean): Promise<RemoteFile[]>;
   enqueue(username: string, file: RemoteFile, batchId: string): Promise<string | null>;
   transfers(): Promise<RemoteTransfer[]>;

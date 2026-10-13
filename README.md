@@ -1,154 +1,49 @@
 # Phonofetch
 
-Phonofetch is a single-container, mobile-friendly download manager for an **existing** slskd 0.26.1 instance. It searches and queues through the slskd REST API; slskd alone handles Soulseek and writes media files. No music-library or downloads mount is required by Phonofetch. No existing slskd or Nicotine+ container is changed.
+Phonofetch is a self-hosted, phone-friendly search and download manager for an **existing slskd instance**. Each line you enter is a Soulseek text search; choose a single track or inspect an album folder, then queue qualifying files through slskd. Transfers and the Activity Log continue on the server after you close the browser.
 
-## Architecture and safeguards
+![Phonofetch folder search results with sample data](./docs/search-results-demo.png)
 
-React/Vite is served by Express from the same container. Express owns slskd credentials, authenticated sessions, input validation and CSRF protection. SQLite under `/data` stores batches, requests, candidate evidence, folder previews/jobs, individual transfers, worker leases and activity. One server-side worker searches, queues and reconciles with slskd even if every browser is closed. Only one Phonofetch replica may use a database.
+*Demo screenshot with synthetic peer and file names.*
 
-The interface uses a native dark greyscale theme with compact sans-serif text and a condensed batch-entry form for phones and tablets. You do not need a browser dark-mode extension for Phonofetch. Activity filters are collapsed by default on narrow screens so recent events remain visible. Mobile Safari may zoom in when a small text field receives focus.
+## Search and download
 
-Review mode is the default. Each nonblank line is one editable full-text search; multiple lines make a batch automatically named `Batch #N [YYYY-MM-DD]` using the Europe/Lisbon date. Each line can request an individual track or an album/folder, with per-line quality. Album/folder defaults to track-seeded directory discovery; select Album title on the reviewed row when the text is an album name. Search results are grouped by peer and directory in a compact file table/tree with file sizes and quality metadata. The **default MP3 320** filter requires an MP3 with API-reported 320 kbps *and* explicit constant-bitrate metadata; an unverified/VBR flag or filename saying "320" is insufficient. FLAC requires a `.flac` extension but cannot establish source provenance. "Any quality" must be selected explicitly. No automatic fallback is made. Track selection queues one file; album/folder requests can queue all eligible files or a checked subset of one inspected folder. Partial albums remain labeled partial if quality excludes files **or** you select only some eligible files. Automatic album selection is reserved for a uniquely confident album-title folder with at least two eligible files and no excluded audio; track-seeded folder downloads require manual confirmation.
+- Results are grouped by peer and folder. The leading folders are inspected automatically; expand **Other folders** or select **Inspect** to browse more. File and folder sizes are shown before downloading.
+- File rows show type and peer-reported bitrate (for example, **MP3 · 320 kbps**). **? kbps** means the peer did not supply a reliable value; Phonofetch never infers it from the filename or size.
+- Select files with checkboxes and **Download selected**, use **Download all** for the eligible files in a folder, or right-click a file. A track search downloads one selected file.
+- **MP3 320** is strict by default: it needs peer-reported 320 kbps **and** confirmed constant bitrate. **FLAC** allows `.flac` files only; **Any quality** is opt-in. Other formats are hidden under expandable excluded results and are never silently queued. Missing remote metadata cannot be verified without downloading the file.
+- Searches collect responses for about five seconds, then show quality-checked matches with peer-reported upload speed and free-slot status. Use **Search longer** if a fast search misses later peers; it replaces that query's results.
+- The Dashboard shows recent downloads and searches. Each search can contain multiple queries (one per line). **Downloads** lists active and finished transfers and completed-file statistics. **Clear finished list** hides only finished entries; **Clear statistics** resets the totals separately. Neither deletes files or cancels an active transfer.
 
-If a queue request's acknowledgement is lost, the item is marked **uncertain**, not automatically resent. Inspect that file in slskd before deciding what to do. SQLite retains the audit trail, including reasons for quality exclusion. Failed searches can be retried from the batch page, optionally with a different explicit quality. Confirmed failed/cancelled files can be manually retried (bounded by `MAX_RETRIES`) after checking slskd for an active/completed copy; each attempt gets a new stable batch UUID. Uncertain transfers cannot be retried blindly.
+## Install
 
-### Finding an album from a track name
+You need Docker, an existing slskd 0.26.1 container on the external Docker network `phonofetch_net`, and a slskd API key with **ReadWrite** access. The supplied [compose.yaml](./compose.yaml) assumes slskd is reachable as `http://slskd:5030`, uses NAS port `7289`, and stores SQLite in `/volume2/docker/phonofetch`; adjust these paths if your setup differs. It does not modify slskd or Nicotine+.
 
-For lines such as `pepper stone love` or `burial archangel`, select **Album / folder** and click **Review list**. Each reviewed row shows its entire editable search string. **Search for → Track inside folder** is the default for album/folder requests; choose **Album title** explicitly if the text names the album. In Review mode, submit the batch and wait for slskd search results. The browser automatically inspects the top **five** distinct folders across the batch, one at a time, showing the actual peer/directory, a compact file tree, per-file sizes, total audio size, eligible download size and exclusions. Other folders show only search hits (explicitly marked *not the full folder*) until you click **Inspect folder**. Folder previews expire after ten minutes and are verified against the peer again before queueing. Check eligible files, then use **Download selected** or **Download all eligible**. Right-click an eligible file for a download action; on phones use the checkboxes and visible buttons. Selection is within one peer's folder, never across siblings. Track mode remains single-file, with both a visible button and a right-click action. Track-seeded folders always require manual confirmation, even in Automatic mode.
-
-Soulseek receives a **single plain-text search**, not separate artist/title fields: `Ben Klock - Subzero` is submitted as `ben klock subzero`. The dash is optional; you can enter `ben klock subzero` directly. Relevance ranking compares the query words to remote filenames and directory paths. The Activity Log records the exact normalized query, slskd search ID, result count and quality exclusions.
-
-The local preview at `127.0.0.1` is not connected to your NAS's slskd, so it cannot produce candidate folders or an Inspect folder button. Perform this workflow on the deployed NAS application.
-
-### slskd 0.26.1 API compatibility
-
-Verified against [slskd 0.26.1 source at `71dcc7a`](https://github.com/slskd/slskd/tree/71dcc7a60650b5a61d1d2a35609b65f3467d1396/src/slskd), with protocol types from its pinned Soulseek.NET 10.0.2 dependency. The backend sends the raw ReadWrite secret only in the `X-API-Key` header. `GET /api/v0/session` probes authentication (not merely unauthenticated `/health`).
-
-| Operation | Verified API / behavior |
-| --- | --- |
-| Search | [`POST /api/v0/searches`](https://github.com/slskd/slskd/blob/71dcc7a60650b5a61d1d2a35609b65f3467d1396/src/slskd/Search/API/Controllers/SearchesController.cs) with `{searchText,fileLimit,searchTimeout}`; poll `GET /api/v0/searches/{id}`, then `GET /api/v0/searches/{id}/responses` after the `Completed` state flag. Responses contain usernames and flattened file `{filename,size,bitRate?,bitDepth?,sampleRate?,isVariableBitRate?}`. In slskd 0.26.1, [`SearchRequest`](https://github.com/slskd/slskd/blob/71dcc7a60650b5a61d1d2a35609b65f3467d1396/src/slskd/Search/API/DTO/SearchRequest.cs) calls the field seconds but forwards it unconverted to [`Soulseek.NET SearchOptions`](https://github.com/jpdillingham/Soulseek.NET/blob/94fba7d4056796af067e6d7b2a8628099723cd26/src/Options/SearchOptions.cs), where it is **milliseconds**. Phonofetch sends `40000` for a 40-second search by default, reserving 5 seconds of its 45-second deadline for polling. Before searching, [`GET /api/v0/server`](https://github.com/slskd/slskd/blob/71dcc7a60650b5a61d1d2a35609b65f3467d1396/src/slskd/Core/API/Controllers/ServerController.cs) confirms slskd is connected and logged in to Soulseek; API authentication alone is insufficient. |
-| Folder | [`POST /api/v0/users/{username}/directory`](https://github.com/slskd/slskd/blob/71dcc7a60650b5a61d1d2a35609b65f3467d1396/src/slskd/Users/API/Controllers/UsersController.cs) requests one folder. Peers may report file basenames or full remote paths and use either slash separator; Phonofetch reconstructs basenames only when the returned directory matches the selected folder. If a targeted response has no usable files, it falls back to `GET /api/v0/users/{username}/browse`, a flat full-share listing. Explicit recursive scope uses browse directly. Both paths are restricted to the selected folder/subtree, never sibling directories. |
-| Queue | [`POST /api/v0/transfers/downloads/batches`](https://github.com/slskd/slskd/blob/71dcc7a60650b5a61d1d2a35609b65f3467d1396/src/slskd/Transfers/API/Controllers/TransfersController.cs) with one `{filename,size}` per Phonofetch transfer, a stable caller-provided batch UUID and username. The response contains failures and generated transfer IDs. No direct directory-download endpoint is used. |
-| Monitor / cancel | `GET /api/v0/transfers/downloads` returns users → directories → transfers with `id,batchId,filename,size,state,bytesTransferred`. `DELETE /api/v0/transfers/downloads/{username}/{id}` cancels by **slskd transfer ID**, not by filename. There is no dedicated server-side retry-by-ID endpoint; slskd itself can retry transfers according to its configured policy. |
-
-Soulseek shares are flat directory listings, not recursive tree objects. The remote `bitRate` and nullable `isVariableBitRate` fields are derived from peer-supplied file attributes, and slskd omits nulls from JSON. `isVariableBitRate: false` explicitly reports constant bitrate; a missing key does **not** imply false. A 320 kbps claim with missing bitrate/VBR data is excluded. Peer-reported metadata cannot independently prove the actual encoded audio, and FLAC provenance cannot be verified remotely. The actual NAS, peer availability and live API responses have **not** been tested in this development environment; the adapter tests use realistic source-based mocks.
-
-## Build and deploy to UGREEN NAS / Portainer
-
-Requirements: Docker Engine with the **existing** `phonofetch_net` external network, existing `slskd` container reachable as `http://slskd:5030` from that network, and a slskd API key configured with `ReadWrite` permissions. Phonofetch never needs port 5030 published on the NAS.
-
-### Files for a source repository
-
-The NAS image build needs `Dockerfile`, `package.json`, `package-lock.json`, `tsconfig.json`, `vite.config.ts`, `index.html`, `src/`, and `public/`. Also keep `.dockerignore` so local secrets and generated files are not sent to the Docker build context. Include `compose.yaml`, `.env.example`, `.gitignore`, `scripts/update-nas.sh`, and this README for deployment and documentation.
-
-Do **not** commit `.env` or other `.env.*` files (except `.env.example`), `.npmrc`, databases, `node_modules/`, `dist/`, logs, image archives, or NAS credentials. The real API key, login password, and session secret are configured **on the NAS** through a private `.env` or Portainer environment. The provided `.gitignore` excludes the common local variants, but check the files you stage before publishing.
-
-1. Copy this source directory to the NAS (e.g. via an SFTP client) and run these commands in that directory over SSH:
-
-   ```sh
-   docker network inspect phonofetch_net
-   mkdir -p /volume2/docker/phonofetch
-   # Node in the production image uses UID/GID 1000. Set ownership/ACLs
-   # appropriately if the NAS's existing permissions differ.
-   sudo chown 1000:1000 /volume2/docker/phonofetch
-   docker build -t phonofetch:local .
-   ```
-
-   Do not change the ownership of `/volume2/docker/slskd` or any music/download folder. `docker network inspect` must show the pre-existing network; the Compose file does not create one.
-
-2. Create a strong application password, a unique random session secret of **at least 32 characters**, and use the **raw** slskd ReadWrite API secret (not its `role=ReadWrite;` declaration prefix). Copy `.env.example` to `.env` alongside `compose.yaml` **on the NAS** and replace every placeholder. Keep that file private (`chmod 600 .env`). Do not put passwords in the repository, the web UI, or browser JavaScript. The defaults are:
-
-   | Setting | Value / purpose |
-   | --- | --- |
-   | `PHONOFETCH_IMAGE` | Optional image reference; defaults to `phonofetch:local`. Set to a published image reference for pull-based updates. |
-   | `PORT`, `TZ`, `DATABASE_PATH` | `3000`, `Europe/Lisbon`, `/data/phonofetch.sqlite` |
-   | `SLSKD_BASE_URL` | `http://slskd:5030` |
-   | `SLSKD_API_KEY` | Raw slskd API secret with `ReadWrite` access |
-   | `PHONOFETCH_AUTH_USERNAME`, `PHONOFETCH_AUTH_PASSWORD` | Single-user login; password at least 12 characters |
-   | `PHONOFETCH_SESSION_SECRET` | Random secret, at least 32 characters |
-   | `TRUST_PROXY` | `false` by default; set to `true` only if an HTTPS reverse proxy you control is the *only* entry point to the app (trusts one proxy hop for Secure cookies/Origin checks) |
-   | `SEARCH_CONCURRENCY`, `SEARCH_TIMEOUT_MS`, `SEARCH_RESULT_LIMIT` | Defaults `2`, `45000`, `120`. The application deadline is in milliseconds (minimum 10000); the slskd 0.26.1 search window is 5 seconds shorter. |
-   | `MAX_RETRIES`, `AUTO_TRACK_SCORE`, `AUTO_ALBUM_SCORE` | Defaults `3`, `0.93`, `0.98` |
-   | `MAX_FOLDER_FILES`, `MAX_FOLDER_BYTES` | Defaults `250`, `10737418240` |
-
-3. Either deploy directly with `docker compose --env-file .env -f compose.yaml up -d` **or** in Portainer:
-   - Build `phonofetch:local` on the NAS as above first. Portainer's web stack editor does **not** have this source as its Docker build context; do not expect it to build the image from a pasted Compose file.
-   - Go to **Stacks → Add stack**, name it `phonofetch`, paste `compose.yaml`.
-   - Enter the four required secrets/username as Portainer stack environment variables (and optional limits), then deploy. Keep Portainer access restricted because stack variables are sensitive.
-   - The stack contains only Phonofetch and uses the **external** `phonofetch_net`. It does not redeploy or depend on modifying slskd.
-
-4. Open `http://NAS-IP:7289` from your local network. Sign in using your configured application credentials. Check the container health status and Activity Log for slskd connectivity. The browser cannot directly reach slskd or the SQLite file.
-
-Compose maps NAS port `7289` to container port `3000`; it does not publish slskd or a database port. Do **not** configure router port forwarding. For outside-home access, use Tailscale or a secured HTTPS reverse proxy. HTTPS is strongly recommended beyond a trusted LAN. Sessions use HttpOnly/SameSite=Strict cookies, with Secure cookies on HTTPS requests. If a reverse proxy terminates TLS, restrict direct access to port 7289 and only then set `TRUST_PROXY=true` so Express trusts the proxy's `X-Forwarded-Proto`/client IP; never trust forwarding headers from untrusted clients. Do not share application access publicly over HTTP.
-
-### Updating without copying source to the NAS
-
-For the existing **CLI-managed** Compose installation, `scripts/update-nas.sh` replaces the repeated download/build/backup/recreate commands with **one NAS command per update**. It requires no Git installation on the NAS, image registry, GitHub token, or changes to the existing slskd or Nicotine+ containers.
-
-After publishing the script to GitHub, install it **once** in the existing NAS Compose directory (not the lowercase `/volume2/docker/phonofetch` data directory):
+In a directory containing the repository files, run:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/AMBIENTCORE/Phonofetch/main/scripts/update-nas.sh \
-  -o /volume2/docker/Phonofetch/update.sh
+docker network inspect phonofetch_net
+mkdir -p /volume2/docker/phonofetch
+# The application runs as UID 1000; grant this user write access to the data folder.
+sudo chown 1000:1000 /volume2/docker/phonofetch
+cp .env.example .env
+# Edit .env: set SLSKD_API_KEY (raw secret, not "role=ReadWrite;"),
+# PHONOFETCH_AUTH_USERNAME, PHONOFETCH_AUTH_PASSWORD and
+# PHONOFETCH_SESSION_SECRET (at least 32 random characters).
+chmod 600 .env
+docker build -t phonofetch:local .
+docker compose --env-file .env -f compose.yaml up -d
+```
+
+Open `http://NAS-IP:7289` on your local network. Keep `.env` **only on the NAS**, never in Git. Do not forward this port publicly; use a VPN or properly secured HTTPS proxy for remote access.
+
+## Update
+
+For the existing **CLI-managed** NAS installation at `/volume2/docker/Phonofetch`, install the [updater](./scripts/update-nas.sh) once after reviewing it:
+
+```sh
+curl -fL https://raw.githubusercontent.com/AMBIENTCORE/Phonofetch/main/scripts/update-nas.sh -o /volume2/docker/Phonofetch/update.sh
 sh /volume2/docker/Phonofetch/update.sh --check
 ```
 
-Review the downloaded script before running it. The check confirms that `phonofetch` is the **only** service in the original `/volume2/docker/Phonofetch/compose.yaml`, its local image is `phonofetch:local`, its `/data` mount points to `/volume2/docker/phonofetch`, and the existing NAS-only `.env` and SQLite file are present. It prints neither credentials nor Compose configuration.
-
-After each later GitHub push, run **one command** over NAS SSH:
-
-```sh
-sh /volume2/docker/Phonofetch/update.sh
-```
-
-The updater downloads a fresh GitHub `main` source archive into a new build directory, preserves the currently running image under a timestamped rollback tag, builds `phonofetch:local` while the app remains online, verifies that its non-root Node runtime can read the package and entry point **before stopping the current container**, stops **only** Phonofetch for a consistent timestamped SQLite backup, then recreates **only** `phonofetch` in the **existing** Compose project and verifies its image ID, health and HTTP endpoint. It does not restart the old container between backup and recreation, avoiding a redundant stop and its potentially long grace period. It refuses mismatched services, image, paths and data mounts. If the build or backup fails, it leaves or restarts the previous container; if deployment or health fails, it stops and reports the backup path. It does **not** automatically roll back the image: a new image may already have migrated SQLite, and restoring an older image alone would be unsafe. Do not schedule unattended updates without a plan for database migration and recovery. The script leaves downloaded build directories and rollback images for diagnosis; inspect disk usage and remove only specific old versions when you no longer need them. If this script changes in GitHub, download and review the new version explicitly.
-
-Alternatively, a GHCR image removes NAS-side builds: publish a Phonofetch image under a versioned tag, set `PHONOFETCH_IMAGE` in the **NAS-only** `.env` (for example `ghcr.io/YOUR-OWNER/phonofetch:v1`), then run on the NAS:
-
-```sh
-docker compose --env-file .env -f compose.yaml pull phonofetch
-docker compose --env-file .env -f compose.yaml up -d --no-deps phonofetch
-```
-
-No GHCR build workflow or published image is configured by this project. If you choose that route later, configure the registry separately and keep `.env`/passwords out of GitHub and the image. A private package additionally requires NAS-side registry read access. Back up `/volume2/docker/phonofetch` before upgrades; only recreate Phonofetch.
-
-Without any external registry, build the image on a machine with Docker, use `docker save -o phonofetch-image.tar phonofetch:local`, transfer **that image archive** to the NAS, run `docker load -i phonofetch-image.tar` there, and recreate only Phonofetch with `docker compose --env-file .env -f compose.yaml up -d --no-deps --force-recreate phonofetch`. This avoids copying source or building on the NAS, but still transfers an image per update.
-
-### Upgrade, backup and removal
-
-Stop Phonofetch or take an SQLite-consistent backup (e.g. SQLite backup API) before copying database files; in WAL mode a live database may include `-wal` and `-shm` files. Simplest safe backup:
-
-```sh
-docker compose --env-file .env -f compose.yaml stop phonofetch
-cp -a /volume2/docker/phonofetch /volume2/docker/phonofetch-backup
-docker compose --env-file .env -f compose.yaml up -d phonofetch
-```
-
-For upgrades, back up first, copy the updated source, rebuild with `docker build -t phonofetch:local .`, then run `docker compose --env-file .env -f compose.yaml up -d --no-deps --force-recreate phonofetch`. In Portainer, rebuild the image on the NAS and **recreate only the Phonofetch stack/container**, not slskd. Migration is automatic on startup; the application refuses database versions newer than it understands. To recover, stop Phonofetch, restore its backed-up `/volume2/docker/phonofetch` directory and permissions, and start only Phonofetch. If you remove it, `docker compose down` affects only this stack; it does **not** delete the external network or slskd. Preserve `/data` if you need history.
-
-### Safe manual end-to-end validation (requires access to NAS)
-
-1. Ensure slskd is already online and the new Phonofetch container can resolve/reach `http://slskd:5030`. Sign in to Phonofetch and confirm a successful slskd authentication/connectivity event. Do not test using real private credentials in development fixtures.
-2. Choose **New Batch**, enter one known full-text query such as `burial archangel` as **Track**, set **Review** mode and choose FLAC or explicitly Any quality if strict 320 metadata is unavailable. Submit, select exactly one eligible candidate, confirm, and check slskd and the batch page for exactly one queued file and its accurate completion. Close the browser briefly and verify progress continues.
-3. Enter a full-text query such as `burial archangel` as **Album / folder** (track-seeded by default), review candidates, inspect a folder and confirm the actual peer/directory, eligible and excluded file list, and size. Use a known small folder you are allowed to download. Confirm; check that only eligible files from that exact directory are queued and that excluded/incomplete albums are labeled partial. If searching an album's name instead, select **Search for → Album title** on the reviewed row.
-4. Restart **only** the Phonofetch container. Check that its batch, transfers and Activity Log remain and that reconciling does not queue duplicates. Inspect the Activity Log for time-stamped explanations and any API errors.
-
-Live Soulseek/slskd/NAS transfers cannot be verified by the local automated tests: they mock slskd's HTTP API. Validate these steps on the NAS before trusting unattended downloads.
-
-## Local development
-
-Requires Node 24+ (`node:sqlite`). Run `npm ci`, `npm test`, `npm run typecheck`, `npm run build`. For a local server use `DATABASE_PATH` pointing at a writable development location and set `SLSKD_API_KEY`, `PHONOFETCH_AUTH_USERNAME`, `PHONOFETCH_AUTH_PASSWORD`, and `PHONOFETCH_SESSION_SECRET` from `.env.example` in your environment, then `npm run dev`. Set `SLSKD_BASE_URL` to an address reachable from the development machine if testing a real slskd instance; its Docker-network default is normally not reachable from the host. Vite's optional dev server (`npx vite`) proxies `/api` to port 3000; production serves the built UI from Express. Tests use only temporary SQLite files and mocked slskd calls.
-
-## Troubleshooting
-
-- `Another Phonofetch worker owns this database`: do not run multiple replicas. Wait 45 seconds after a crashed instance before restarting.
-- `Cannot read package config /app/package.json: permission denied`: a previously built image copied root-owned source files with restrictive NAS extraction permissions while the runtime runs as `node`. The production [Dockerfile](Dockerfile) now gives the runtime user ownership of the package files; the updater's non-root smoke check catches this **before** the database backup and container replacement. If an older image is already crash-looping with precisely this error, the application never started and therefore did not migrate SQLite; use its timestamped rollback image with the existing Compose project to restore service, then publish this Dockerfile fix and refresh the NAS copy of `update.sh`. Do not assume an image-only rollback is safe for other startup failures.
-- Search appears to return zero results: first check the request status. **Pending** with an `slskd unavailable` banner means no search has been sent; connect Phonofetch to the existing slskd on `phonofetch_net`. **No results** means a search completed: the request message and Activity Log distinguish zero files returned from files rejected by strict quality. Open **Activity Log** (filter Category to `slskd` or `search`) for the exact query and API errors, or check structured container output with `docker logs --tail 200 phonofetch` / Portainer's container **Logs** view. The batch's Recent activity includes only events linked to that batch; global slskd connection failures appear in the full Activity Log.
-- slskd accepted the query but Phonofetch shows **Failed** with an `Errored` search state: the slskd search failed asynchronously, not because of the quality filter. Compare the same query in slskd's own web UI and inspect `docker logs --tail 200 slskd` for Soulseek connection/search errors. Phonofetch retries these failures with a bounded backoff; it does not label them as zero search results.
-- Search state `Completed, TimedOut` only milliseconds after `startedAt`: slskd 0.26.1 treats `searchTimeout` as milliseconds despite its REST DTO comment saying seconds. Older Phonofetch images sent `40` instead of `40000`. Rebuild/update Phonofetch and retry the search; a search with no peer responses should now run for about 40 seconds, not 40 milliseconds.
-- **slskd API reachable but Soulseek disconnected/not logged in**: open slskd's own web UI and inspect `docker logs --tail 200 slskd`. Phonofetch leaves pending searches waiting until slskd reconnects; it does not claim that an offline search found no files.
-- No strict MP3 320 results: unverified or VBR bitrate is deliberately excluded. Inspect exclusion reasons; explicitly choose FLAC or Any quality on a manual retry if you want different criteria.
-- Folder preview changed/expired: inspect it again before queueing; contents and eligibility must match the confirmation snapshot.
-- A candidate folder shows only search hits or its targeted directory appears empty: click **Inspect folder**. Phonofetch attempts the slskd full-share browse if targeted directory contents are empty or have mismatched paths. If neither API response contains usable files under that exact path, the Activity Log records a folder-browsing failure; it does not claim a complete album was inspected.
-- `uncertain` queue state: inspect slskd's transfer list for the exact peer/path. Phonofetch never blindly retries an ambiguous enqueue. If slskd no longer reports a file, Phonofetch does not infer that it completed.
-- No NAS access or API errors: check Portainer container logs, network membership, raw ReadWrite API key, slskd service status, and the persistent Activity Log. Never paste keys or cookies into issue reports.
+After pushing changes to GitHub, update with `sh /volume2/docker/Phonofetch/update.sh`. It builds the new image, tests non-root access, backs up SQLite, recreates **only** Phonofetch, and checks container health. If the updater itself changes, download and review its new version again. Backups and the database stay on the NAS; live Soulseek behavior depends on your slskd/peer connections.

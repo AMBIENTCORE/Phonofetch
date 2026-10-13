@@ -37,6 +37,7 @@ function harness() {
     startSearch: vi.fn(async () => "search-id"),
     getSearch: vi.fn(async () => ({ id: "search-id", state: "InProgress", finished: false,
       reportedFileCount: 0, reportedResponseCount: 0, results: [] })),
+    stopSearch: vi.fn(async () => {}),
     browse: vi.fn(async () => []),
     transfers: vi.fn(async () => live),
     enqueue: vi.fn(async (_username, _file, transferId) => {
@@ -63,7 +64,7 @@ describe("worker retries and recovery", () => {
     vi.mocked(h.port.getSearch).mockResolvedValueOnce({ id: "search-id", state: "Completed", finished: true,
       reportedFileCount: 0, reportedResponseCount: 0, results: [] });
     await h.worker.runOnce();
-    expect(h.port.startSearch).toHaveBeenCalledWith("ben klock subzero");
+    expect(h.port.startSearch).toHaveBeenCalledWith("ben klock subzero", 40000);
     expect(h.getRequest()).toMatchObject({ status: "no_results", error: "Soulseek returned no files for this text search" });
     expect(h.store.activity({ category: "search", search: "Soulseek text search: ben klock subzero" })).toHaveLength(1);
     expect(h.store.activity({ category: "search", search: "0 files returned" })).toHaveLength(1);
@@ -97,6 +98,71 @@ describe("worker retries and recovery", () => {
     expect(h.port.startSearch).toHaveBeenCalledTimes(1);
   });
 
+  it("stops a fast search at its deadline and shows already collected, quality-checked files", async () => {
+    const h = harness();
+    h.store.run("UPDATE requests SET search_window_ms=5000 WHERE id=?", h.id);
+    const inProgress = { id: "search-id", state: "InProgress", finished: false,
+      reportedFileCount: 2, reportedResponseCount: 1, results: [] };
+    vi.mocked(h.port.getSearch).mockResolvedValueOnce(inProgress).mockResolvedValueOnce(inProgress)
+      .mockResolvedValueOnce({ id: "search-id", state: "Completed, Cancelled", finished: true,
+        reportedFileCount: 2, reportedResponseCount: 1, results: [
+          { username: "alice", path: "Burial\\Untrue\\01 Archangel.flac", directory: "Burial\\Untrue",
+            size: 300, metadata: unknownMetadata(), upload_speed: 8192, queue_length: 0, free_slot: true },
+          { username: "alice", path: "Burial\\Untrue\\02 Archangel.mp3", directory: "Burial\\Untrue",
+            size: 120, metadata: unknownMetadata(), upload_speed: 8192, queue_length: 0, free_slot: true }
+        ] });
+    await h.worker.runOnce();
+    expect(h.getRequest()).toMatchObject({ status: "searching", search_file_count: 2, search_response_count: 1 });
+    expect(h.port.stopSearch).not.toHaveBeenCalled();
+    h.store.run("UPDATE requests SET search_started_at=? WHERE id=?",
+      new Date(Date.now() - 6000).toISOString(), h.id);
+    await h.worker.runOnce();
+    expect(h.port.stopSearch).toHaveBeenCalledOnce();
+    expect(h.getRequest().search_stop_requested_at).toBeTruthy();
+    await h.worker.runOnce();
+    expect(h.getRequest().status).toBe("review");
+    expect(h.store.batchDetail(h.getRequest().batch_id)?.requests[0]?.candidates).toMatchObject([
+      { path: "Burial\\Untrue\\01 Archangel.flac", eligible: true, upload_speed: 8192, free_slot: true },
+      { path: "Burial\\Untrue\\02 Archangel.mp3", eligible: false }
+    ]);
+    expect(h.port.stopSearch).toHaveBeenCalledOnce();
+  });
+
+  it("retries stopping a fast search if the slskd stop request fails", async () => {
+    const h = harness();
+    h.store.run("UPDATE requests SET search_window_ms=5000 WHERE id=?", h.id);
+    vi.mocked(h.port.stopSearch).mockRejectedValueOnce(new Error("slskd unavailable"));
+    await h.worker.runOnce();
+    h.store.run("UPDATE requests SET search_started_at=? WHERE id=?",
+      new Date(Date.now() - 6000).toISOString(), h.id);
+    await h.worker.runOnce();
+    expect(h.getRequest().status).toBe("searching");
+    expect(h.getRequest().search_stop_requested_at).toBeNull();
+    await h.worker.runOnce();
+    expect(h.port.stopSearch).toHaveBeenCalledTimes(2);
+    expect(h.store.activity({ category: "search", search: "slskd unavailable" })).toHaveLength(1);
+  });
+
+  it("uses quality and relevance before the candidate cap, not the first peer's unwanted files", async () => {
+    const h = harness();
+    vi.mocked(h.port.getSearch).mockResolvedValueOnce({
+      id: "search-id", state: "Completed", finished: true, reportedFileCount: 122, reportedResponseCount: 2,
+      results: [
+        ...Array.from({ length: h.config.SEARCH_RESULT_LIMIT }, (_, i) => ({
+          username: "slow", path: `Other\\Track ${i}.mp3`, directory: "Other",
+          size: 100, metadata: unknownMetadata(), upload_speed: 100
+        })),
+        { username: "fast", path: "Burial\\Untrue\\Archangel.flac", directory: "Burial\\Untrue",
+          size: 200, metadata: unknownMetadata(), upload_speed: 100000, free_slot: true }
+      ]
+    });
+    await h.worker.runOnce();
+    const candidates = h.store.batchDetail(h.getRequest().batch_id)?.requests[0]?.candidates;
+    expect(h.getRequest().status).toBe("review");
+    expect(candidates).toHaveLength(h.config.SEARCH_RESULT_LIMIT);
+    expect(candidates?.[0]).toMatchObject({ username: "fast", eligible: true, upload_speed: 100000 });
+  });
+
   it("keeps searches pending while slskd is unavailable and reports the connection state", async () => {
     const h = harness();
     vi.mocked(h.port.check).mockRejectedValueOnce(new Error("slskd offline"));
@@ -107,6 +173,22 @@ describe("worker retries and recovery", () => {
     await h.worker.runOnce();
     expect(h.port.startSearch).toHaveBeenCalledTimes(1);
     expect(h.store.slskdStatus()).toBe("connected");
+  });
+
+  it("shows a hidden failed transfer again if reconciliation finds it active", async () => {
+    const h = harness();
+    const now = new Date().toISOString();
+    h.store.run("UPDATE requests SET status='failed' WHERE id=?", h.id);
+    h.store.run(`INSERT INTO transfers(id,queue_id,request_id,username,path,size,status,created_at,updated_at)
+      VALUES(?,?,?,?,?,100,'failed',?,?)`, "local-transfer", "q1", h.id, "alice", "Music\\Track.flac", now, now);
+    expect(h.store.clearFinishedDownloads()).toBe(1);
+    expect(h.store.downloads(10, 10).finished_total).toBe(0);
+    h.live.push({ id: "remote-transfer", batchId: "q1", username: "alice", path: "Music\\Track.flac",
+      size: 100, transferred: 20, status: "active" });
+    await h.worker.runOnce();
+    expect(h.store.downloads(10, 10).active).toMatchObject([
+      { id: "local-transfer", status: "active", hidden_from_downloads: 0 }
+    ]);
   });
 
   it("backs off on search failure and times out without creating duplicate searches", async () => {

@@ -21,7 +21,9 @@ describe("slskd 0.26.1 REST adapter", () => {
         expect(JSON.parse(String(init.body))).toMatchObject({ searchText: "Burial Archangel", fileLimit: 5, searchTimeout: 40000 });
         return json({ id: "search-id", state: "InProgress", fileCount: 0, responseCount: 0, searchText: "Burial Archangel" });
       }
-      if (url.endsWith("/api/v0/searches/search-id")) return json({ id: "search-id", state: "Completed", fileCount: 2, responseCount: 1 });
+      if (url.endsWith("/api/v0/searches/search-id")) return json({
+        id: "search-id", state: "Completed", endedAt: "2026-10-13T08:00:00Z", fileCount: 2, responseCount: 1
+      });
       if (url.endsWith("/api/v0/searches/search-id/responses")) return json([
         { username: "alice", files: [file("Burial\\Untrue\\01 Archangel.mp3"),
           { filename: "Burial\\Untrue\\02 Missing.mp3", size: 100, code: 1 }] }
@@ -170,12 +172,44 @@ describe("slskd 0.26.1 REST adapter", () => {
   it("does not treat an empty responses endpoint as zero results when slskd reports files", async () => {
     const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10,
       vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/responses") ? json([]) :
-        json({ id: "search-id", state: "Completed", fileCount: 12, responseCount: 2 })));
+        json({ id: "search-id", state: "Completed", endedAt: "2026-10-13T08:00:00Z", fileCount: 12, responseCount: 2 })));
     await expect(adapter.getSearch("search-id")).rejects.toThrow("reports 12 search files");
   });
 
+  it("stops searches on request and reads partial files and peer speed after cancellation", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        expect(JSON.parse(String(init.body)).searchTimeout).toBe(5000);
+        return json({ id: "search-id", state: "InProgress", fileCount: 0, responseCount: 0 });
+      }
+      if (init?.method === "PUT") return new Response(null, { status: 200 });
+      if (String(input).endsWith("/responses")) return json([
+        { username: "alice", uploadSpeed: 4096, queueLength: 2, hasFreeUploadSlot: true,
+          files: [file("Burial\\Untrue\\01 Archangel.mp3")] }
+      ]);
+      return json({ id: "search-id", state: "Completed, Cancelled", endedAt: "2026-10-13T08:00:00Z", fileCount: 1, responseCount: 1 });
+    });
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 45000, 120, fetcher);
+    expect(await adapter.startSearch("burial archangel", 5000)).toBe("search-id");
+    await adapter.stopSearch("search-id");
+    expect(fetcher.mock.calls[1]?.[1]?.method).toBe("PUT");
+    expect(await adapter.getSearch("search-id")).toMatchObject({ finished: true, state: "Completed, Cancelled",
+      results: [{ upload_speed: 4096, queue_length: 2, free_slot: true }] });
+  });
+
+  it("waits for slskd to persist early-stopped files before treating cancellation as final", async () => {
+    const fetcher = vi.fn(async () => json({
+      id: "search-id", state: "Completed, Cancelled", endedAt: null, fileCount: 1, responseCount: 1
+    }));
+    const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+    expect(await adapter.getSearch("search-id")).toMatchObject({ finished: false, results: [] });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("preserves errored search state without fetching potentially absent responses", async () => {
-    const fetcher = vi.fn(async () => json({ id: "search-id", state: "Completed, Errored", fileCount: 0, responseCount: 0 }));
+    const fetcher = vi.fn(async () => json({
+      id: "search-id", state: "Completed, Errored", endedAt: "2026-10-13T08:00:00Z", fileCount: 0, responseCount: 0
+    }));
     const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
     expect(await adapter.getSearch("search-id")).toMatchObject({ finished: true, state: "Completed, Errored", results: [] });
     expect(fetcher).toHaveBeenCalledTimes(1);

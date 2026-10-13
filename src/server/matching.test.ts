@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalize, parseLines, parentDirectory, qualityCheck, rankFile, rankFolder, withinDirectory, unknownMetadata } from "./matching";
+import { mergeAudioMetadata, normalize, parseLines, parentDirectory, qualityCheck, rankFile, rankFolder, withinDirectory, unknownMetadata } from "./matching";
 import type { RemoteFile } from "../shared/types";
 
 const file = (path: string, bitrate: number | null = null, vbr: boolean | null = null): RemoteFile =>
@@ -30,6 +30,16 @@ describe("request parsing and matching", () => {
     expect(qualityCheck(file("album\\song.flac"), "flac").eligible).toBe(true);
     expect(qualityCheck(file("album\\cover.jpg"), "any").eligible).toBe(false);
     expect(qualityCheck({ ...file("album\\song.flac"), size: 0 }, "flac").eligible).toBe(false);
+  });
+
+  it("uses matching search metadata when browsing omits it, but rejects conflicting reports", () => {
+    const searched = { ...unknownMetadata(), bitrate: 320, vbr: false, sampleRate: 44100 };
+    const merged = mergeAudioMetadata(unknownMetadata(), searched);
+    expect(merged).toEqual(searched);
+    expect(qualityCheck({ ...file("album\\song.mp3"), metadata: merged }, "mp3_320").eligible).toBe(true);
+    const conflicting = mergeAudioMetadata({ ...unknownMetadata(), bitrate: 192, vbr: true }, searched);
+    expect(conflicting).toMatchObject({ bitrate: null, vbr: null, sampleRate: 44100 });
+    expect(qualityCheck({ ...file("album\\song.mp3"), metadata: conflicting }, "mp3_320").eligible).toBe(false);
   });
 
   it("ranks text relevance ahead of unrelated 320 kbps matches", () => {

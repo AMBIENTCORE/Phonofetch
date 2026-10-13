@@ -7,7 +7,7 @@ const request = (status: RequestStatus = "review") => ({
   jobs: [], previews: [],
   candidates: Array.from({ length: 8 }, (_, index) => ({
     id: `candidate-${index}`, username: `peer-${index}`, directory: `Music\\Album-${index}`,
-    score: 1 - index / 10
+    score: 1 - index / 10, eligible: true
   }))
 });
 
@@ -35,5 +35,13 @@ describe("bounded folder inspection", () => {
     ]);
     expect(autoFolderPreviews([item], new Set(Array.from({ length: 5 }, (_, index) =>
       folderKey(item.id, `peer-${index}`, `Music\\Album-${index}`, false))))).toHaveLength(0);
+  });
+
+  it("inspects quality-eligible search-hit folders ahead of format-excluded folders", () => {
+    const item = request();
+    item.candidates[0]!.eligible = false;
+    item.candidates[1]!.eligible = false;
+    expect(autoFolderPreviews([item], new Set()).map(folder => folder.candidateId))
+      .toEqual(["candidate-2", "candidate-3", "candidate-4", "candidate-5", "candidate-6"]);
   });
 });

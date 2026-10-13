@@ -11,7 +11,7 @@ interface PreviewRequest {
   status: RequestStatus;
   jobs: readonly unknown[];
   previews: readonly Pick<FolderPreview, "username" | "directory" | "recursive">[];
-  candidates: readonly Pick<Candidate, "id" | "username" | "directory" | "score">[];
+  candidates: readonly Pick<Candidate, "id" | "username" | "directory" | "score" | "eligible">[];
 }
 
 export function autoFolderPreviews(requests: readonly PreviewRequest[], attempted: ReadonlySet<string>): Array<{
@@ -19,16 +19,19 @@ export function autoFolderPreviews(requests: readonly PreviewRequest[], attempte
 }> {
   const known = new Set(requests.flatMap(request => request.previews.filter(preview => !preview.recursive)
     .map(preview => folderKey(request.id, preview.username, preview.directory, false))));
-  const groups = new Map<string, { requestId: string; candidateId: string; score: number }>();
+  const groups = new Map<string, { requestId: string; candidateId: string; score: number; eligible: boolean }>();
   for (const request of requests) {
     if (request.type !== "album_folder" || !["review", "no_results"].includes(request.status) || request.jobs.length) continue;
     for (const candidate of request.candidates) {
       const key = folderKey(request.id, candidate.username, candidate.directory, false);
-      if (!groups.has(key) && !known.has(key) && !attempted.has(key))
-        groups.set(key, { requestId: request.id, candidateId: candidate.id, score: candidate.score });
+      if (known.has(key) || attempted.has(key)) continue;
+      const existing = groups.get(key);
+      if (!existing) groups.set(key, { requestId: request.id, candidateId: candidate.id,
+        score: candidate.score, eligible: candidate.eligible });
+      else if (candidate.eligible) existing.eligible = true;
     }
   }
-  return [...groups].sort((a, b) => b[1].score - a[1].score)
+  return [...groups].sort((a, b) => Number(b[1].eligible) - Number(a[1].eligible) || b[1].score - a[1].score)
     .slice(0, Math.max(0, AUTO_FOLDER_PREVIEW_LIMIT - attempted.size))
     .map(([key, item]) => ({ key, requestId: item.requestId, candidateId: item.candidateId }));
 }

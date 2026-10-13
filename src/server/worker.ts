@@ -36,7 +36,7 @@ export class Worker {
       }
     }, 10000);
     this.timer = setInterval(() => { void this.runOnce().catch(error =>
-      this.store.event("error", "worker", "cycle_failed", `Worker cycle failed: ${this.message(error)}`)); }, 4000);
+      this.store.event("error", "worker", "cycle_failed", `Worker cycle failed: ${this.message(error)}`)); }, 1000);
     void this.runOnce().catch(error =>
       this.store.event("error", "worker", "startup_recovery_failed", `Startup reconciliation failed: ${this.message(error)}`));
   }
@@ -108,9 +108,9 @@ export class Worker {
       this.store.run("UPDATE requests SET status='searching',search_started_at=?,updated_at=? WHERE id=? AND status='pending'",
         date, date, request.id);
       this.store.event("info", "search", "started", `Soulseek text search: ${query}`,
-        { batchId: request.batch_id, requestId: request.id }, { query });
+        { batchId: request.batch_id, requestId: request.id }, { query, windowMs: request.search_window_ms });
       try {
-        const id = await this.port.startSearch(query);
+        const id = await this.port.startSearch(query, request.search_window_ms);
         this.store.run("UPDATE requests SET search_id=?,updated_at=? WHERE id=?", id, new Date().toISOString(), request.id);
         this.store.event("info", "search", "submitted", `slskd accepted search ${id}`,
           { batchId: request.batch_id, requestId: request.id });
@@ -123,7 +123,7 @@ export class Worker {
     const message = this.message(error);
     if (retries <= this.config.MAX_RETRIES) {
       const delay = Math.min(60000, 2000 * 2 ** (retries - 1));
-      this.store.run("UPDATE requests SET status='pending',retries=?,error=?,search_id=NULL,next_attempt_at=?,updated_at=? WHERE id=?",
+      this.store.run("UPDATE requests SET status='pending',retries=?,error=?,search_id=NULL,search_stop_requested_at=NULL,next_attempt_at=?,updated_at=? WHERE id=?",
         retries, message, new Date(Date.now() + delay).toISOString(), new Date().toISOString(), request.id);
       this.store.event("warning", "search", "retry", `Search failed; retry ${retries}/${this.config.MAX_RETRIES} in ${delay / 1000}s: ${message}`,
         { batchId: request.batch_id, requestId: request.id });
@@ -144,7 +144,8 @@ export class Worker {
         { batchId: request.batch_id, requestId: request.id });
       return;
     }
-    if (request.search_started_at && Date.now() - Date.parse(request.search_started_at) > this.config.SEARCH_TIMEOUT_MS) {
+    const elapsed = request.search_started_at ? Date.now() - Date.parse(request.search_started_at) : 0;
+    if (elapsed > Math.max(this.config.SEARCH_TIMEOUT_MS, request.search_window_ms + 10000)) {
       this.store.run("UPDATE requests SET status='failed',error=?,updated_at=? WHERE id=?",
         "Search timed out; retry manually", new Date().toISOString(), request.id);
       this.store.event("warning", "search", "timeout", "Search timed out",
@@ -153,12 +154,27 @@ export class Worker {
     }
     try {
       const snapshot = await this.port.getSearch(request.search_id);
-      if (!snapshot.finished) return;
+      if (!snapshot.finished) {
+        if (elapsed >= request.search_window_ms && !request.search_stop_requested_at) {
+          await this.port.stopSearch(request.search_id);
+          const now = new Date().toISOString();
+          this.store.run("UPDATE requests SET search_stop_requested_at=?,updated_at=? WHERE id=? AND status='searching'",
+            now, now, request.id);
+          this.store.event("info", "search", "window_reached",
+            `Search window ended after ${request.search_window_ms / 1000}s; collecting responses from slskd`,
+            { batchId: request.batch_id, requestId: request.id });
+        }
+        if (request.search_file_count !== snapshot.reportedFileCount ||
+          request.search_response_count !== snapshot.reportedResponseCount)
+          this.store.run("UPDATE requests SET search_file_count=?,search_response_count=? WHERE id=?",
+            snapshot.reportedFileCount, snapshot.reportedResponseCount, request.id);
+        return;
+      }
       if (/\bErrored\b/i.test(snapshot.state)) {
         this.retrySearch(request, new Error(`slskd search ended in ${snapshot.state} with ${snapshot.reportedResponseCount} responses`));
         return;
       }
-      if (/\bCancelled\b/i.test(snapshot.state)) {
+      if (/\bCancelled\b/i.test(snapshot.state) && !request.search_stop_requested_at) {
         this.store.run("UPDATE requests SET status='cancelled',error=?,updated_at=? WHERE id=?",
           `slskd search was cancelled (${snapshot.state})`, new Date().toISOString(), request.id);
         this.store.event("warning", "search", "cancelled", `slskd search ${request.search_id} was cancelled`,
@@ -168,24 +184,26 @@ export class Worker {
       const dedup = new Map<string, RemoteFile>();
       for (const file of snapshot.results) {
         dedup.set(`${file.username}\0${file.path}`, file);
-        if (dedup.size >= this.config.SEARCH_RESULT_LIMIT) break;
       }
       const candidates: Candidate[] = Array.from(dedup.values()).map(file => {
         const eligibility = qualityCheck(file, request.quality);
         const relevance = rankFile(request, file);
         return { ...file, ...eligibility, ...relevance, request_id: request.id, id: randomUUID(), selected: false };
-      }).sort((a, b) => b.score - a.score);
+      }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score ||
+        Number(b.free_slot === true) - Number(a.free_slot === true) ||
+        (b.upload_speed ?? -1) - (a.upload_speed ?? -1)).slice(0, this.config.SEARCH_RESULT_LIMIT);
       this.store.transaction(() => {
         for (const candidate of candidates) {
-          this.store.run(`INSERT OR IGNORE INTO candidates(id,request_id,username,path,directory,size,metadata,eligible,reason,score,explanation,selected)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,0)`, candidate.id, request.id, candidate.username, candidate.path, candidate.directory,
-          candidate.size, JSON.stringify(candidate.metadata), Number(candidate.eligible), candidate.reason, candidate.score, candidate.explanation);
+          this.store.run(`INSERT OR IGNORE INTO candidates(id,request_id,username,path,directory,size,metadata,eligible,reason,score,explanation,selected,upload_speed,queue_length,free_slot)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)`, candidate.id, request.id, candidate.username, candidate.path, candidate.directory,
+          candidate.size, JSON.stringify(candidate.metadata), Number(candidate.eligible), candidate.reason, candidate.score, candidate.explanation,
+          candidate.upload_speed ?? null, candidate.queue_length ?? null, candidate.free_slot == null ? null : Number(candidate.free_slot));
         }
         const hasEligible = candidates.some(c => c.eligible);
-        this.store.run("UPDATE requests SET status=?,error=?,updated_at=? WHERE id=?",
+        this.store.run("UPDATE requests SET status=?,error=?,search_file_count=?,search_response_count=?,updated_at=? WHERE id=?",
           hasEligible ? "review" : "no_results",
           hasEligible ? null : candidates.length ? "No files met the selected quality requirements" : "Soulseek returned no files for this text search",
-          new Date().toISOString(), request.id);
+          snapshot.reportedFileCount, snapshot.reportedResponseCount, new Date().toISOString(), request.id);
         this.store.event("info", "search", "completed",
           `Search ${snapshot.state}: ${snapshot.results.length} files returned, ${candidates.length} distinct, ${candidates.filter(c => c.eligible).length} eligible`,
           { batchId: request.batch_id, requestId: request.id },
@@ -270,8 +288,10 @@ export class Worker {
       if (remote) {
         const changed = item.status !== remote.status;
         const progress = Math.round(100 * Math.min(1, remote.transferred / Math.max(1, item.size)));
-        this.store.run("UPDATE transfers SET status=?,slskd_id=?,transferred=?,progress=?,error=NULL,updated_at=? WHERE id=?",
-          remote.status, remote.id, remote.transferred, progress, new Date().toISOString(), item.id);
+        this.store.run(`UPDATE transfers SET status=?,slskd_id=?,transferred=?,progress=?,error=NULL,updated_at=?,
+          stat_epoch=CASE WHEN ?='completed' THEN (SELECT epoch FROM download_stats WHERE id=1) ELSE stat_epoch END,
+          hidden_from_downloads=CASE WHEN status<>? THEN 0 ELSE hidden_from_downloads END WHERE id=?`,
+          remote.status, remote.id, remote.transferred, progress, new Date().toISOString(), remote.status, remote.status, item.id);
         const request = this.store.get<MusicRequest>("SELECT * FROM requests WHERE id=?", item.request_id);
         if (["ready", "queueing", "uncertain"].includes(item.status))
           this.store.event("info", "recovery", "transfer_found",
@@ -310,8 +330,9 @@ export class Worker {
       const existing = byBatch.get(item.queue_id ?? item.id) ??
         (item.retries || (samePath && ["failed", "cancelled"].includes(samePath.status)) ? undefined : samePath);
       if (existing) {
-        this.store.run("UPDATE transfers SET status=?,slskd_id=?,transferred=?,updated_at=? WHERE id=?",
-          existing.status, existing.id, existing.transferred, new Date().toISOString(), item.id);
+        this.store.run(`UPDATE transfers SET status=?,slskd_id=?,transferred=?,updated_at=?,
+          stat_epoch=CASE WHEN ?='completed' THEN (SELECT epoch FROM download_stats WHERE id=1) ELSE stat_epoch END WHERE id=?`,
+          existing.status, existing.id, existing.transferred, new Date().toISOString(), existing.status, item.id);
         this.store.event("info", "recovery", "transfer_found", `Existing slskd transfer found for ${item.path}; no duplicate enqueue`,
           { requestId: item.request_id, transferId: item.id });
         continue;

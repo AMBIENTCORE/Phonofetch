@@ -66,6 +66,17 @@ export function qualityCheck(file: Pick<RemoteFile, "path" | "metadata" | "size"
   return { eligible: true, reason: "Metadata reports 320 kbps constant bitrate" };
 }
 
+export function mergeAudioMetadata(browsed: AudioMetadata, searched: AudioMetadata): AudioMetadata {
+  const field = <T>(fromBrowse: T | null, fromSearch: T | null): T | null =>
+    fromBrowse !== null && fromSearch !== null && fromBrowse !== fromSearch ? null : fromBrowse ?? fromSearch;
+  return {
+    bitrate: field(browsed.bitrate, searched.bitrate),
+    sampleRate: field(browsed.sampleRate, searched.sampleRate),
+    bitDepth: field(browsed.bitDepth, searched.bitDepth),
+    vbr: field(browsed.vbr, searched.vbr)
+  };
+}
+
 function similarity(target: string, actual: string): number {
   const a = normalize(target).split(" ").filter(Boolean);
   const b = normalize(actual).split(" ").filter(Boolean);

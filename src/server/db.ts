@@ -2,9 +2,13 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Activity, Batch, BatchDetail, Candidate, FolderJob, FolderPreview, MusicRequest, PreviewFile, Severity, SlskdConnectionState, TransferItem } from "../shared/types";
+import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsData, DownloadStats, FolderJob, FolderPreview, MusicRequest, PreviewFile, Severity, SlskdConnectionState, TransferItem } from "../shared/types";
 
 type SqlValue = string | number | bigint | Buffer | null;
+
+export function batchName(number: number, search: string, count: number): string {
+  return `Search #${number}${search ? ` · ${search}` : ""}${count > 1 ? ` (+${count - 1} more)` : ""}`;
+}
 
 export class Store {
   readonly db: DatabaseSync;
@@ -13,7 +17,7 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000");
     const version = this.db.prepare("PRAGMA user_version").get()?.user_version;
-    if (![0, 1, 2, 3, 4, 5, 6].includes(Number(version))) throw new Error(`Unsupported database version: ${String(version)}`);
+    if (![0, 1, 2, 3, 4, 5, 6, 7, 8].includes(Number(version))) throw new Error(`Unsupported database version: ${String(version)}`);
     if (version === 0) {
       this.transaction(() => {
         this.db.exec(`
@@ -26,7 +30,10 @@ export class Store {
             query_text TEXT NOT NULL, type TEXT NOT NULL,
             seed_kind TEXT NOT NULL, artist TEXT NOT NULL, title TEXT NOT NULL, original_input TEXT NOT NULL,
             norm_artist TEXT NOT NULL, norm_title TEXT NOT NULL, quality TEXT NOT NULL, mode TEXT NOT NULL,
-            status TEXT NOT NULL, search_id TEXT, search_started_at TEXT, selected_candidate_id TEXT,
+            status TEXT NOT NULL, search_id TEXT, search_started_at TEXT,
+            search_window_ms INTEGER NOT NULL DEFAULT 40000, search_stop_requested_at TEXT,
+            search_file_count INTEGER NOT NULL DEFAULT 0, search_response_count INTEGER NOT NULL DEFAULT 0,
+            selected_candidate_id TEXT,
             selected_directory TEXT, score REAL, explanation TEXT, error TEXT,
             retries INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
           );
@@ -36,7 +43,8 @@ export class Store {
             id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES requests(id), username TEXT NOT NULL,
             path TEXT NOT NULL, directory TEXT NOT NULL, size INTEGER NOT NULL, metadata TEXT NOT NULL,
             eligible INTEGER NOT NULL, reason TEXT NOT NULL, score REAL NOT NULL, explanation TEXT NOT NULL,
-            selected INTEGER NOT NULL DEFAULT 0, UNIQUE(request_id,username,path)
+            selected INTEGER NOT NULL DEFAULT 0, upload_speed INTEGER, queue_length INTEGER, free_slot INTEGER,
+            UNIQUE(request_id,username,path)
           );
           CREATE INDEX candidates_request ON candidates(request_id,score DESC);
           CREATE TABLE folder_previews (
@@ -56,9 +64,12 @@ export class Store {
             slskd_id TEXT, queue_id TEXT NOT NULL,
             transferred INTEGER NOT NULL DEFAULT 0, progress REAL NOT NULL DEFAULT 0,
             error TEXT, retries INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            hidden_from_downloads INTEGER NOT NULL DEFAULT 0, stat_epoch INTEGER NOT NULL DEFAULT 0,
             UNIQUE(username,path,request_id)
           );
           CREATE INDEX transfers_status ON transfers(status);
+          CREATE TABLE download_stats (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL DEFAULT 0);
+          INSERT INTO download_stats(id,epoch) VALUES(1,0);
           CREATE TABLE activity (
             id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, severity TEXT NOT NULL,
             category TEXT NOT NULL, event_type TEXT NOT NULL, message TEXT NOT NULL,
@@ -73,7 +84,7 @@ export class Store {
           CREATE TABLE worker_lock (
             id INTEGER PRIMARY KEY CHECK (id=1), owner TEXT NOT NULL, expires_at TEXT NOT NULL
           );
-          PRAGMA user_version=6;
+          PRAGMA user_version=8;
         `);
       });
     }
@@ -107,6 +118,23 @@ export class Store {
         ALTER TABLE folder_jobs ADD COLUMN unselected_count INTEGER NOT NULL DEFAULT 0;
         UPDATE folder_jobs SET selected_count=eligible_count;
         PRAGMA user_version=6;`);
+    });
+    if (version === 1 || version === 2 || version === 3 || version === 4 || version === 5 || version === 6) this.transaction(() => {
+      this.db.exec(`ALTER TABLE requests ADD COLUMN search_window_ms INTEGER NOT NULL DEFAULT 40000;
+        ALTER TABLE requests ADD COLUMN search_stop_requested_at TEXT;
+        ALTER TABLE requests ADD COLUMN search_file_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE requests ADD COLUMN search_response_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE candidates ADD COLUMN upload_speed INTEGER;
+        ALTER TABLE candidates ADD COLUMN queue_length INTEGER;
+        ALTER TABLE candidates ADD COLUMN free_slot INTEGER;
+        PRAGMA user_version=7;`);
+    });
+    if (version !== 0 && Number(version) < 8) this.transaction(() => {
+      this.db.exec(`ALTER TABLE transfers ADD COLUMN hidden_from_downloads INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE transfers ADD COLUMN stat_epoch INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE download_stats (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO download_stats(id,epoch) VALUES(1,0);
+        PRAGMA user_version=8;`);
     });
   }
 
@@ -158,10 +186,12 @@ export class Store {
   activity(filters: { severity?: string; category?: string; batchId?: string; requestId?: string; search?: string; cursor?: number; limit?: number } = {}): Activity[] {
     const where: string[] = [];
     const args: SqlValue[] = [];
-    for (const [column, value] of [["severity", filters.severity], ["category", filters.category],
+    for (const [column, value] of [["severity", filters.severity],
       ["batch_id", filters.batchId], ["request_id", filters.requestId]] as const) {
       if (value) { where.push(`${column}=?`); args.push(value); }
     }
+    if (filters.category === "search") where.push("category IN ('search','batch')");
+    else if (filters.category) { where.push("category=?"); args.push(filters.category); }
     if (filters.search) { where.push("message LIKE ? ESCAPE '\\'"); args.push(`%${filters.search.replace(/[\\%_]/g, "\\$&")}%`); }
     if (filters.cursor) { where.push("id<?"); args.push(filters.cursor); }
     return this.all<Activity>(`SELECT * FROM activity ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
@@ -173,14 +203,59 @@ export class Store {
       "SELECT event_type FROM activity WHERE category='slskd' AND event_type IN ('connected','unavailable') ORDER BY id DESC LIMIT 1")?.event_type ?? null;
   }
 
+  downloadStats(): DownloadStats {
+    const stats = this.get<DownloadStats>(`SELECT
+      COALESCE(SUM(CASE WHEN status='completed' AND stat_epoch=(SELECT epoch FROM download_stats WHERE id=1) THEN 1 ELSE 0 END),0) AS completed_count,
+      COALESCE(SUM(CASE WHEN status='completed' AND stat_epoch=(SELECT epoch FROM download_stats WHERE id=1) THEN size ELSE 0 END),0) AS completed_bytes,
+      COALESCE(SUM(CASE WHEN status IN ('ready','queueing','queued','active') THEN 1 ELSE 0 END),0) AS active_count,
+      COALESCE(SUM(CASE WHEN status IN ('ready','queueing','queued','active') THEN transferred ELSE 0 END),0) AS active_transferred_bytes,
+      COALESCE(SUM(CASE WHEN status='uncertain' THEN 1 ELSE 0 END),0) AS uncertain_count
+      FROM transfers`);
+    if (!stats) throw new Error("Could not read download statistics");
+    return stats;
+  }
+
+  downloads(activeLimit: number, finishedLimit: number): DownloadsData {
+    const from = `FROM transfers t JOIN requests r ON r.id=t.request_id JOIN batches b ON b.id=r.batch_id`;
+    const fields = `SELECT t.*,r.batch_id,r.query_text,b.number AS batch_number ${from}`;
+    const activeWhere = "t.hidden_from_downloads=0 AND t.status IN ('ready','queueing','queued','active','uncertain')";
+    const finishedWhere = "t.hidden_from_downloads=0 AND t.status IN ('completed','failed','cancelled')";
+    return {
+      active: this.all<DownloadItem>(`${fields} WHERE ${activeWhere} ORDER BY t.updated_at DESC,t.id DESC LIMIT ?`, activeLimit),
+      finished: this.all<DownloadItem>(`${fields} WHERE ${finishedWhere} ORDER BY t.updated_at DESC,t.id DESC LIMIT ?`, finishedLimit),
+      active_total: this.get<{ count: number }>(`SELECT COUNT(*) AS count ${from} WHERE ${activeWhere}`)?.count ?? 0,
+      finished_total: this.get<{ count: number }>(`SELECT COUNT(*) AS count ${from} WHERE ${finishedWhere}`)?.count ?? 0,
+      stats: this.downloadStats()
+    };
+  }
+
+  clearFinishedDownloads(): number {
+    return this.transaction(() => {
+      const count = this.get<{ count: number }>(`SELECT COUNT(*) AS count FROM transfers
+        WHERE status IN ('completed','failed','cancelled') AND hidden_from_downloads=0`)?.count ?? 0;
+      this.run(`UPDATE transfers SET hidden_from_downloads=1
+        WHERE status IN ('completed','failed','cancelled') AND hidden_from_downloads=0`);
+      this.event("info", "downloads", "list_cleared", `Cleared ${count} finished downloads from the list`);
+      return count;
+    });
+  }
+
+  clearDownloadStats(): void {
+    this.transaction(() => {
+      this.run("UPDATE download_stats SET epoch=epoch+1 WHERE id=1");
+      this.event("info", "downloads", "stats_cleared", "Download statistics reset; transfers remain available");
+    });
+  }
+
   batchDetail(id: string): BatchDetail | undefined {
     const batch = this.get<Batch>("SELECT * FROM batches WHERE id=?", id);
     if (!batch) return undefined;
     const requests = this.all<MusicRequest>("SELECT * FROM requests WHERE batch_id=? ORDER BY position,created_at,id", id).map(request => {
-      const candidates = this.all<Omit<Candidate, "metadata" | "eligible" | "selected"> & { metadata: string; eligible: number; selected: number }>(
+      const candidates = this.all<Omit<Candidate, "metadata" | "eligible" | "selected" | "free_slot"> & { metadata: string; eligible: number; selected: number; free_slot: number | null }>(
         "SELECT * FROM candidates WHERE request_id=? ORDER BY score DESC LIMIT 200", request.id)
         .map(candidate => ({ ...candidate, metadata: JSON.parse(candidate.metadata) as Candidate["metadata"],
-          eligible: Boolean(candidate.eligible), selected: Boolean(candidate.selected) }));
+          eligible: Boolean(candidate.eligible), selected: Boolean(candidate.selected),
+          free_slot: candidate.free_slot === null ? null : Boolean(candidate.free_slot) }));
       const previews = this.all<Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number }>(
         "SELECT * FROM folder_previews WHERE request_id=? ORDER BY created_at DESC LIMIT 20", request.id)
         .map(preview => this.inflatePreview(preview));
@@ -194,7 +269,8 @@ export class Store {
       requests.some(request => ["failed", "uncertain"].includes(request.status)) ? "attention" :
         requests.every(request => ["completed", "partial"].includes(request.status)) ? "partial" :
           requests.some(request => ["active", "queueing", "searching", "pending"].includes(request.status)) ? "processing" : "review";
-    return { batch: { ...batch, status, counts }, slskd_status: this.slskdStatus(),
+    return { batch: { ...batch, name: batchName(batch.number, requests[0]?.query_text ?? "", requests.length), status, counts },
+      slskd_status: this.slskdStatus(),
       requests, activity: this.activity({ batchId: id, limit: 15 }) };
   }
 

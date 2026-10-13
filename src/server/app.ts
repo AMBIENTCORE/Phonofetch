@@ -5,7 +5,7 @@ import { z, ZodError } from "zod";
 import type { Batch, Candidate, FolderPreview, MusicRequest, Quality } from "../shared/types";
 import { ApiError, installAuth } from "./auth";
 import type { Config } from "./config";
-import { Store } from "./db";
+import { Store, batchName } from "./db";
 import { normalize, parseLines } from "./matching";
 import type { SlskdPort } from "./port";
 import { Workflow } from "./workflow";
@@ -43,74 +43,74 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
   });
   installAuth(app, store, config);
   app.get("/api/dashboard", (_, res) => {
-    const batches = store.all<Batch & { total: number; completed: number; active: number; unresolved: number }>(
+    const batches = store.all<Batch & { total: number; first_query: string | null }>(
       `SELECT b.*,COUNT(r.id) AS total,
-        SUM(CASE WHEN r.status IN ('completed','partial') THEN 1 ELSE 0 END) AS completed,
-        SUM(CASE WHEN r.status IN ('queueing','active','searching') THEN 1 ELSE 0 END) AS active,
-        SUM(CASE WHEN r.status IN ('review','no_results','failed') THEN 1 ELSE 0 END) AS unresolved
-        FROM batches b LEFT JOIN requests r ON r.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100`);
-    const counts: Record<string, number> = Object.fromEntries(store.all<{ status: string; count: number }>(
-      "SELECT status,COUNT(*) AS count FROM requests GROUP BY status").map(row => [row.status, row.count]));
-    counts.active = (counts.active ?? 0) + (counts.searching ?? 0) + (counts.queueing ?? 0);
-    counts.review = (counts.review ?? 0) + (counts.no_results ?? 0);
-    counts.failed = (counts.failed ?? 0) + (counts.uncertain ?? 0);
-    res.json({ batches, counts, slskd_status: store.slskdStatus(), activity: store.activity({ limit: 8 }) });
+        (SELECT query_text FROM requests WHERE batch_id=b.id ORDER BY position,created_at,id LIMIT 1) AS first_query
+        FROM batches b LEFT JOIN requests r ON r.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100`)
+      .map(batch => ({ ...batch, name: batchName(batch.number, batch.first_query ?? "", batch.total) }));
+    res.json({ batches, downloads: store.downloads(5, 5), slskd_status: store.slskdStatus(), activity: store.activity({ limit: 8 }) });
+  });
+  app.get("/api/downloads", (req, res) => {
+    const { activeLimit, finishedLimit } = z.object({
+      activeLimit: z.coerce.number().int().min(1).max(25000).default(50),
+      finishedLimit: z.coerce.number().int().min(1).max(25000).default(50)
+    }).parse(req.query);
+    res.json(store.downloads(activeLimit, finishedLimit));
+  });
+  app.post("/api/downloads/clear", (_, res) => {
+    res.json({ cleared: store.clearFinishedDownloads() });
+  });
+  app.post("/api/downloads/stats/clear", (_, res) => {
+    store.clearDownloadStats();
+    res.json({ stats: store.downloadStats() });
   });
   app.post("/api/batches", (req, res) => {
     const body = newBatch.parse(req.body);
     const sourceLines = parseLines(body.originalInput, body.defaultType);
-    if (sourceLines.length > 100) throw new ApiError(400, "A batch can contain at most 100 nonempty lines");
+    if (sourceLines.length > 100) throw new ApiError(400, "A search can contain at most 100 nonempty lines");
     const available = new Map<string, number>();
     for (const line of sourceLines) available.set(line.original, (available.get(line.original) ?? 0) + 1);
     const seen = new Set<string>();
     for (const item of body.entries) {
       const remaining = available.get(item.original) ?? 0;
-      if (!remaining) throw new ApiError(400, "Reviewed entry is not in the original batch input");
+      if (!remaining) throw new ApiError(400, "Reviewed entry is not in the submitted search text");
       available.set(item.original, remaining - 1);
       if (item.type === "track" && item.seedKind !== "track_seed") throw new ApiError(400, "Track requests must use track seed");
       if (!normalize(item.queryText)) throw new ApiError(400, "Search line must contain searchable text");
       const key = `${normalize(item.queryText)}\0${item.type}\0${item.seedKind}`;
       if (seen.has(key)) {
-        store.event("warning", "batch", "duplicate_detected", `Duplicate request detected: ${item.queryText}`);
+        store.event("warning", "batch", "duplicate_detected", `Duplicate query detected: ${item.queryText}`);
         throw new ApiError(400, "Duplicate requests must be removed or edited before submission");
       }
       seen.add(key);
     }
     const id = randomUUID();
     const date = new Date().toISOString();
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/Lisbon", year: "numeric", month: "2-digit", day: "2-digit"
-    }).formatToParts(new Date(date));
-    const datePart = (type: Intl.DateTimeFormatPartTypes): string => {
-      const part = parts.find(item => item.type === type);
-      if (!part) throw new Error(`Could not format batch date: ${type}`);
-      return part.value;
-    };
     let number = 0;
     let name = "";
     store.transaction(() => {
       const next = store.get<{ value: number }>("SELECT COALESCE(MAX(number),0)+1 AS value FROM batches");
       if (!next) throw new Error("Could not allocate batch number");
       number = next.value;
-      name = `Batch #${number} [${datePart("year")}-${datePart("month")}-${datePart("day")}]`;
+      name = batchName(number, body.entries[0]!.queryText, body.entries.length);
       store.run("INSERT INTO batches(id,number,name,original_input,default_type,mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
         id, number, name, body.originalInput, body.defaultType, body.mode, date, date);
       for (const [position, item] of body.entries.entries()) {
         const requestId = randomUUID();
-        store.run(`INSERT INTO requests(id,batch_id,position,query_text,type,seed_kind,artist,title,original_input,norm_artist,norm_title,quality,mode,status,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,'','',?,'','',?,?,'pending',?,?)`, requestId, id, position, item.queryText, item.type, item.seedKind,
-        item.original, item.quality, body.mode, date, date);
+        store.run(`INSERT INTO requests(id,batch_id,position,query_text,type,seed_kind,artist,title,original_input,norm_artist,norm_title,quality,mode,status,search_window_ms,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,'','',?,'','',?,?,'pending',?,?,?)`, requestId, id, position, item.queryText, item.type, item.seedKind,
+        item.original, item.quality, body.mode, config.SEARCH_FAST_WINDOW_MS, date, date);
         store.event("info", "batch", "parsed", `Parsed ${item.type}: ${item.queryText}`,
           { batchId: id, requestId }, { quality: item.quality, seedKind: item.seedKind });
       }
-      store.event("success", "batch", "created", `${name} created with ${body.entries.length} requests`,
+      store.event("success", "batch", "created", `${name} created with ${body.entries.length} queries`,
         { batchId: id }, { mode: body.mode });
     });
     res.status(201).json({ id, number, name });
   });
   app.get("/api/batches/:id", (req, res) => {
     const detail = store.batchDetail(uuid.parse(req.params.id));
-    if (!detail) throw new ApiError(404, "Batch not found");
+    if (!detail) throw new ApiError(404, "Search not found");
     res.json(detail);
   });
   function getRequest(id: string): MusicRequest {
@@ -119,11 +119,12 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
     return request;
   }
   function getCandidate(request: MusicRequest, id: string): Candidate {
-    const row = store.get<Omit<Candidate, "metadata" | "eligible" | "selected"> & { metadata: string; eligible: number; selected: number }>(
+    const row = store.get<Omit<Candidate, "metadata" | "eligible" | "selected" | "free_slot"> & { metadata: string; eligible: number; selected: number; free_slot: number | null }>(
       "SELECT * FROM candidates WHERE id=? AND request_id=?", uuid.parse(id), request.id);
     if (!row) throw new ApiError(404, "Candidate not found");
     return { ...row, metadata: JSON.parse(row.metadata) as Candidate["metadata"],
-      eligible: Boolean(row.eligible), selected: Boolean(row.selected) };
+      eligible: Boolean(row.eligible), selected: Boolean(row.selected),
+      free_slot: row.free_slot === null ? null : Boolean(row.free_slot) };
   }
   app.post("/api/requests/:id/select", (req, res) => {
     const request = getRequest(req.params.id);
@@ -152,8 +153,10 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
     const request = getRequest(req.params.id);
     if (!["no_results", "failed", "review", "cancelled"].includes(request.status))
       throw new ApiError(409, "Request cannot be retried while processing");
-    const { quality } = z.object({ quality: z.enum(["mp3_320", "flac", "any"]) }).parse(req.body);
-    workflow.retry(request, quality as Quality);
+    const { quality, longer } = z.object({
+      quality: z.enum(["mp3_320", "flac", "any"]), longer: z.boolean().default(false)
+    }).parse(req.body);
+    workflow.retry(request, quality, longer);
     res.json({ ok: true });
   });
   app.post("/api/transfers/:id/cancel", async (req, res) => {
@@ -187,7 +190,7 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
       const current = store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", id);
       if (!current || !["failed", "cancelled"].includes(current.status))
         throw new ApiError(409, "Transfer state changed; retry not queued");
-      store.run(`UPDATE transfers SET queue_id=?,slskd_id=NULL,status='ready',transferred=0,progress=0,
+      store.run(`UPDATE transfers SET queue_id=?,slskd_id=NULL,status='ready',transferred=0,progress=0,hidden_from_downloads=0,
         error=NULL,retries=retries+1,updated_at=? WHERE id=?`, randomUUID(), date, id);
       store.run("UPDATE requests SET status='queueing',updated_at=? WHERE id=?", date, transfer.request_id);
       store.event("info", "transfer", "retry_requested", `Manual retry ${transfer.retries + 1}/${config.MAX_RETRIES} for ${transfer.path}`,

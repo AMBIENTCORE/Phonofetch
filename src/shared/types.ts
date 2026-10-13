@@ -37,6 +37,10 @@ export interface MusicRequest {
   status: RequestStatus;
   search_id: string | null;
   search_started_at: string | null;
+  search_window_ms: number;
+  search_stop_requested_at: string | null;
+  search_file_count: number;
+  search_response_count: number;
   selected_candidate_id: string | null;
   selected_directory: string | null;
   score: number | null;
@@ -61,6 +65,9 @@ export interface RemoteFile {
   directory: string;
   size: number;
   metadata: AudioMetadata;
+  upload_speed?: number | null;
+  queue_length?: number | null;
+  free_slot?: boolean | null;
 }
 
 export interface Candidate extends RemoteFile {
@@ -127,6 +134,28 @@ export interface TransferItem {
   retries: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface DownloadItem extends TransferItem {
+  batch_id: string;
+  batch_number: number;
+  query_text: string;
+}
+
+export interface DownloadStats {
+  completed_count: number;
+  completed_bytes: number;
+  active_count: number;
+  active_transferred_bytes: number;
+  uncertain_count: number;
+}
+
+export interface DownloadsData {
+  active: DownloadItem[];
+  finished: DownloadItem[];
+  active_total: number;
+  finished_total: number;
+  stats: DownloadStats;
 }
 
 export interface Activity {

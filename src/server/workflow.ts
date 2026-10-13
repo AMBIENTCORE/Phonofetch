@@ -1,20 +1,36 @@
 import { randomUUID } from "node:crypto";
-import type { Candidate, FolderPreview, MusicRequest, PreviewFile, RemoteFile, Quality } from "../shared/types";
+import type { AudioMetadata, Candidate, FolderPreview, MusicRequest, PreviewFile, RemoteFile, Quality } from "../shared/types";
 import { ApiError } from "./auth";
 import type { Config } from "./config";
 import { Store } from "./db";
-import { qualityCheck, rankFolder, withinDirectory } from "./matching";
+import { mergeAudioMetadata, qualityCheck, rankFolder, withinDirectory } from "./matching";
 import type { SlskdPort } from "./port";
 
 export class Workflow {
   constructor(readonly store: Store, readonly port: SlskdPort, readonly config: Config) {}
+
+  private async browseFiles(request: MusicRequest, username: string, directory: string, recursive: boolean): Promise<RemoteFile[]> {
+    const browsed = await this.port.browse(username, directory, recursive);
+    const seeds = this.store.all<{ path: string; size: number; metadata: string }>(
+      "SELECT path,size,metadata FROM candidates WHERE request_id=? AND username=?", request.id, username);
+    const key = (path: string, size: number): string => JSON.stringify([path.replace(/\\/g, "/"), size]);
+    const reported = new Map<string, AudioMetadata | null>();
+    for (const seed of seeds) {
+      const id = key(seed.path, seed.size);
+      reported.set(id, reported.has(id) ? null : JSON.parse(seed.metadata) as AudioMetadata);
+    }
+    return browsed.map(file => {
+      const metadata = reported.get(key(file.path, file.size));
+      return metadata ? { ...file, metadata: mergeAudioMetadata(file.metadata, metadata) } : file;
+    });
+  }
 
   async preview(request: MusicRequest, candidate: Candidate, recursive: boolean): Promise<FolderPreview> {
     if (request.type !== "album_folder" || request.id !== candidate.request_id) throw new ApiError(400, "Not an album candidate");
     this.store.event("info", "folder", "browse_started", "Browsing remote folder", { batchId: request.batch_id, requestId: request.id },
       { username: candidate.username, directory: candidate.directory, recursive });
     try {
-      const all = await this.port.browse(candidate.username, candidate.directory, recursive);
+      const all = await this.browseFiles(request, candidate.username, candidate.directory, recursive);
       const bounded = all.filter(file => withinDirectory(file.path, candidate.directory, recursive));
       if (bounded.length > this.config.MAX_FOLDER_FILES) throw new ApiError(413, "Folder exceeds configured file limit");
       if (!bounded.length) throw new ApiError(404, "Selected directory is empty or inaccessible");
@@ -63,7 +79,7 @@ export class Workflow {
       request.id, preview.username, preview.directory);
     if (seed?.score == null) throw new ApiError(409, "Folder has no matching search candidate");
     const evidence = rankFolder(request, preview.directory, preview.files, seed.score);
-    const current = await this.port.browse(preview.username, preview.directory, preview.recursive);
+    const current = await this.browseFiles(request, preview.username, preview.directory, preview.recursive);
     const now = current.filter(file => withinDirectory(file.path, preview.directory, preview.recursive))
       .filter(file => /\.(mp3|flac|m4a|ogg|opus|wav|aac)$/i.test(file.path))
       .map(file => ({ ...file, ...qualityCheck(file, request.quality) })).sort((a, b) => a.path.localeCompare(b.path));
@@ -116,16 +132,18 @@ export class Workflow {
       VALUES(?,?,?,?,?,?,?,'ready',?,?)`, id, id, request.id, jobId, file.username, file.path, file.size, date, date);
   }
 
-  retry(request: MusicRequest, quality: Quality): void {
+  retry(request: MusicRequest, quality: Quality, longer = false): void {
     this.store.transaction(() => {
       if (this.store.get("SELECT id FROM transfers WHERE request_id=? LIMIT 1", request.id))
         throw new ApiError(409, "Existing transfers cannot be blindly retried or enqueued again");
       this.store.run("DELETE FROM folder_previews WHERE request_id=?", request.id);
       this.store.run("DELETE FROM candidates WHERE request_id=?", request.id);
       this.store.run(`UPDATE requests SET quality=?,status='pending',search_id=NULL,search_started_at=NULL,
+        search_window_ms=?,search_stop_requested_at=NULL,search_file_count=0,search_response_count=0,
         selected_candidate_id=NULL,selected_directory=NULL,score=NULL,explanation=NULL,error=NULL,
-        retries=0,next_attempt_at=NULL,updated_at=? WHERE id=?`, quality, new Date().toISOString(), request.id);
-      this.store.event("info", "search", "retry_requested", `Retry requested with ${quality} quality`,
+        retries=0,next_attempt_at=NULL,updated_at=? WHERE id=?`, quality,
+      longer ? this.config.SEARCH_TIMEOUT_MS - 5000 : this.config.SEARCH_FAST_WINDOW_MS, new Date().toISOString(), request.id);
+      this.store.event("info", "search", "retry_requested", `Retry requested with ${quality} quality (${longer ? "long" : "fast"} search)`,
         { batchId: request.batch_id, requestId: request.id });
     });
   }
