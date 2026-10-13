@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsData, DownloadStats, FolderJob, FolderPreview, MusicRequest, PreviewFile, Severity, SlskdConnectionState, TransferItem } from "../shared/types";
+import { manualSelectionCheck } from "./matching";
 
 type SqlValue = string | number | bigint | Buffer | null;
 
@@ -253,17 +254,25 @@ export class Store {
     const batch = this.get<Batch>("SELECT * FROM batches WHERE id=?", id);
     if (!batch) return undefined;
     const requests = this.all<MusicRequest>("SELECT * FROM requests WHERE batch_id=? ORDER BY position,created_at,id", id).map(request => {
+      const transfers = this.all<TransferItem>("SELECT * FROM transfers WHERE request_id=? ORDER BY path", request.id);
+      const manualReview = request.mode === "review" && !transfers.length &&
+        ["review", "no_results"].includes(request.status);
       const candidates = this.all<Omit<Candidate, "metadata" | "eligible" | "selected" | "free_slot"> & { metadata: string; eligible: number; selected: number; free_slot: number | null }>(
         "SELECT * FROM candidates WHERE request_id=? ORDER BY score DESC LIMIT 200", request.id)
         .map(candidate => ({ ...candidate, metadata: JSON.parse(candidate.metadata) as Candidate["metadata"],
-          eligible: Boolean(candidate.eligible), selected: Boolean(candidate.selected),
+          ...(request.mode === "review" ? manualSelectionCheck(candidate) :
+            { eligible: Boolean(candidate.eligible), reason: candidate.reason }),
+          selected: Boolean(candidate.selected),
           free_slot: candidate.free_slot === null ? null : Boolean(candidate.free_slot) }));
       const previews = this.all<Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number }>(
         "SELECT * FROM folder_previews WHERE request_id=? ORDER BY created_at DESC LIMIT 20", request.id)
-        .map(preview => this.inflatePreview(preview));
+        .map(preview => this.inflatePreview(preview, request.mode === "review"));
       const jobs = this.all<FolderJob>("SELECT * FROM folder_jobs WHERE request_id=? ORDER BY created_at DESC", request.id)
         .map(job => ({ ...job, transfers: this.all<TransferItem>("SELECT * FROM transfers WHERE folder_job_id=? ORDER BY path", job.id) }));
-      return { ...request, candidates, previews, jobs, transfers: this.all<TransferItem>("SELECT * FROM transfers WHERE request_id=? ORDER BY path", request.id) };
+      const status = request.status === "no_results" && manualReview && candidates.some(candidate => candidate.eligible) ?
+        "review" : request.status;
+      return { ...request, status, error: status === request.status ? request.error : null,
+        candidates, previews, jobs, transfers };
     });
     const counts: Record<string, number> = {};
     for (const request of requests) counts[request.status] = (counts[request.status] ?? 0) + 1;
@@ -276,8 +285,10 @@ export class Store {
       requests, activity: this.activity({ batchId: id, limit: 15, hideFileDetails: true }) };
   }
 
-  inflatePreview(row: Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number }): FolderPreview {
-    const files = JSON.parse(row.files) as PreviewFile[];
+  inflatePreview(row: Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number },
+    manual = false): FolderPreview {
+    const stored = JSON.parse(row.files) as PreviewFile[];
+    const files = manual ? stored.map(file => ({ ...file, ...manualSelectionCheck(file) })) : stored;
     const eligible = files.filter(file => file.eligible);
     return { ...row, files, recursive: Boolean(row.recursive), eligible_count: eligible.length,
       excluded_count: files.length - eligible.length,

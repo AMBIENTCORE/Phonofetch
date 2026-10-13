@@ -25,7 +25,8 @@ describe("slskd 0.26.1 REST adapter", () => {
         id: "search-id", state: "Completed", endedAt: "2026-10-13T08:00:00Z", fileCount: 2, responseCount: 1
       });
       if (url.endsWith("/api/v0/searches/search-id/responses")) return json([
-        { username: "alice", files: [file("Burial\\Untrue\\01 Archangel.mp3"),
+        { username: "alice", files: [{ ...file("Burial\\Untrue\\01 Archangel.mp3"),
+          attributes: [{ type: "BitRate", value: 320 }, { type: "VariableBitRate", value: 0 }] },
           { filename: "Burial\\Untrue\\02 Missing.mp3", size: 100, code: 1 }] }
       ]);
       throw new Error(`Unexpected request ${url}`);
@@ -51,7 +52,8 @@ describe("slskd 0.26.1 REST adapter", () => {
       }
       const directories = [
         { name: "Burial\\Untrue", fileCount: 2, files: [
-          { ...file("Burial\\Untrue\\01 Archangel.mp3"), attributes: [{ type: 0, value: 320 }, { type: 2, value: 0 }] },
+          { ...file("Burial\\Untrue\\01 Archangel.mp3"),
+            attributes: [{ type: "BitRate", value: 320 }, { type: "VariableBitRate", value: 0 }] },
           { filename: "Burial\\Untrue\\02 Ghost.flac", size: 1234, sampleRate: 96000, bitDepth: 24 }] },
         { name: "Burial\\Another", files: [file("Burial\\Another\\03 Sibling.mp3")] },
         { name: "Burial\\Untrue\\CD2", files: [file("Burial\\Untrue\\CD2\\04 Nested.mp3")] }
@@ -153,6 +155,41 @@ describe("slskd 0.26.1 REST adapter", () => {
       expect((await adapter.browse("alice", "Music\\Album", false)).map(item => item.path))
         .toEqual(["Music\\Album\\Song.flac"]);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("root"));
+    } finally { warn.mockRestore(); }
+  });
+
+  it("inspects a folder late in a full-share browse with string-valued audio attribute types", async () => {
+    const directories = Array.from({ length: 723 }, (_, index) => ({
+      name: `Music\\Unrelated-${index}`,
+      files: [{ filename: `Other-${index}.mp3`, size: 100, attributes: [{ type: "unknown", value: 320 }] }]
+    }));
+    directories.push({
+      name: "Music\\Album",
+      files: [{ filename: "Track.mp3", size: 3828401,
+        attributes: [{ type: "BitRate", value: 320 }, { type: "VariableBitRate", value: 0 }] }]
+    });
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith("/directory") ?
+      json({ name: "Music\\Album", files: [] }) : json({ directories, lockedDirectories: [] }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10, fetcher);
+      expect(await adapter.browse("alice", "Music\\Album", false)).toMatchObject([
+        { path: "Music\\Album\\Track.mp3", metadata: { bitrate: 320, vbr: false } }
+      ]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("POST directory returned unexpected response shape"));
+    } finally { warn.mockRestore(); }
+  });
+
+  it("still reports an unknown attribute type in the selected folder", async () => {
+    const invalid = [{ name: "Music\\Album", files: [{
+      filename: "Track.mp3", size: 100, attributes: [{ type: "NotAnAudioAttribute", value: 320 }]
+    }] }];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const adapter = new SlskdAdapter("http://slskd:5030", "secret", 5000, 10,
+        vi.fn(async () => json(invalid)));
+      await expect(adapter.browse("alice", "Music\\Album", false))
+        .rejects.toThrow("GET browse returned unexpected response shape at directories.0.files.0.attributes.0.type");
     } finally { warn.mockRestore(); }
   });
 

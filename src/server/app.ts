@@ -131,9 +131,17 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
   }
   app.post("/api/requests/:id/select", (req, res) => {
     const request = getRequest(req.params.id);
-    if (request.status !== "review") throw new ApiError(409, "Request is not awaiting review");
+    if (request.status !== "review" && !(request.status === "no_results" && request.mode === "review"))
+      throw new ApiError(409, "Request is not awaiting review");
     const { candidateId } = z.object({ candidateId: uuid }).parse(req.body);
     res.status(202).json({ id: workflow.queueTrack(request, getCandidate(request, candidateId)) });
+  });
+  app.post("/api/requests/:id/select-hits", (req, res) => {
+    const request = getRequest(req.params.id);
+    if (request.status !== "review" && !(request.status === "no_results" && request.mode === "review"))
+      throw new ApiError(409, "Request is not awaiting review");
+    const { candidateIds } = z.object({ candidateIds: z.array(uuid).min(1).max(Math.max(1000, config.MAX_FOLDER_FILES)) }).parse(req.body);
+    res.status(202).json({ ids: workflow.queueSearchHits(request, candidateIds) });
   });
   app.post("/api/requests/:id/preview", async (req, res) => {
     const request = getRequest(req.params.id);
@@ -145,12 +153,14 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
     const request = getRequest(req.params.id);
     if (request.status !== "review" && request.status !== "no_results") throw new ApiError(409, "Request is not awaiting review");
     const { previewId, selectedPaths } = z.object({
-      previewId: uuid, selectedPaths: z.array(z.string().min(1).max(1024)).max(config.MAX_FOLDER_FILES).optional()
+      previewId: uuid, selectedPaths: z.array(z.string().min(1).max(1024))
+        .max(Math.max(1000, config.MAX_FOLDER_FILES)).optional()
     }).parse(req.body);
     const row = store.get<Omit<FolderPreview, "files" | "recursive" | "eligible_count" | "excluded_count" | "audio_bytes" | "eligible_bytes"> & { files: string; recursive: number }>(
       "SELECT * FROM folder_previews WHERE id=? AND request_id=?", previewId, request.id);
     if (!row) throw new ApiError(404, "Folder preview not found");
-    res.status(202).json({ id: await workflow.queueFolder(request, store.inflatePreview(row), selectedPaths) });
+    res.status(202).json({ id: await workflow.queueFolder(request,
+      store.inflatePreview(row, request.mode === "review"), selectedPaths) });
   });
   app.post("/api/requests/:id/retry", (req, res) => {
     const request = getRequest(req.params.id);

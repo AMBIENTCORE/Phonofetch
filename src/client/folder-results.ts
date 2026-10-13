@@ -5,13 +5,22 @@ export const AUTO_FOLDER_PREVIEW_LIMIT = 5;
 export const folderKey = (requestId: string, username: string, directory: string, recursive: boolean): string =>
   JSON.stringify([requestId, username, directory, recursive]);
 
-export function searchHitQueueReason(request: { type: RequestType; status: RequestStatus; transfers: readonly unknown[] },
+export function searchHitSelectionReason(request: { type: RequestType; status: RequestStatus; transfers: readonly unknown[] },
   candidate: Pick<Candidate, "eligible" | "reason">): string | null {
   if (!candidate.eligible) return candidate.reason;
-  if (request.type !== "search") return "Inspect to download";
-  if (request.transfers.length) return "Already queued; search again";
+  if (request.type === "track") return "Select one track";
+  if (request.transfers.length) return "Already queued";
   if (request.status !== "review") return "Search not ready";
   return null;
+}
+
+export function searchHitsOutsidePreview(hits: readonly Candidate[], preview: FolderPreview | undefined,
+  selected: ReadonlySet<string>): Candidate[] {
+  if (!preview) return [...hits];
+  const key = (file: Pick<Candidate, "username" | "path" | "size">): string =>
+    JSON.stringify([file.username, file.path.replace(/\\/g, "/"), file.size]);
+  const inspected = new Set(preview.files.map(key));
+  return hits.filter(hit => selected.has(hit.id) || !inspected.has(key(hit)));
 }
 
 interface PreviewRequest {

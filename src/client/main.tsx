@@ -2,8 +2,9 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsData, DownloadStats, FolderPreview, PreviewFile, Quality, RemoteFile, RequestType, SeedKind, SlskdConnectionState, TransferItem } from "../shared/types";
 import { parentDirectory, parseLines } from "../server/matching";
+import { readApiResponse } from "./api-response";
 import { audioDetails, fileFormat } from "./audio-details";
-import { autoFolderPreviews, folderKey, searchHitQueueReason } from "./folder-results";
+import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import "./compact.css";
 
@@ -14,9 +15,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers: { ...(init.body ? { "Content-Type": "application/json" } : {}), ...(csrf ? { "X-CSRF-Token": csrf } : {}), ...init.headers }
   });
-  const data: unknown = await response.json();
-  if (!response.ok) throw new Error(typeof data === "object" && data !== null && "error" in data ? String(data.error) : `HTTP ${response.status}`);
-  return data as T;
+  return readApiResponse<T>(response);
 }
 const send = <T,>(path: string, body: object = {}): Promise<T> => api<T>(path, { method: "POST", body: JSON.stringify(body) });
 const time = (value: string): string => new Intl.DateTimeFormat("en-GB", {
@@ -309,11 +308,13 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   const [retryQuality, setRetryQuality] = useState<Quality>(request.quality);
   const [preset, setPreset] = useState<ResultPreset>("all");
   const [filterText, setFilterText] = useState("");
-  const [trackMenu, setTrackMenu] = useState<{ candidateId: string; x: number; y: number } | null>(null);
+  const [selectedHits, setSelectedHits] = useState<Set<string>>(new Set());
+  const [selectedPreviews, setSelectedPreviews] = useState<Map<string, Set<string>>>(new Map());
   const parsedFilter = parseResultFilter(filterText);
   const matches = (file: Pick<RemoteFile, "path" | "size" | "metadata">): boolean =>
     parsedFilter.value !== null && matchesResult(file, preset, parsedFilter.value);
-  const oldQualityLimit = request.quality !== "any" && ["review", "no_results"].includes(request.status) &&
+  const oldQualityLimit = request.mode === "automatic" && request.quality !== "any" &&
+    ["review", "no_results"].includes(request.status) &&
     !request.transfers.length;
   const grouped = new Map<string, typeof request.candidates>();
   for (const candidate of request.candidates) {
@@ -345,13 +346,29 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   const folderDisclosures = useDisclosureGroup(
     `${request.id}:${request.type}:folders:${request.candidates.length}:${request.previews.length}:${recursive}:${preset}:${filterText}`);
   const canInspect = ["review", "no_results"].includes(request.status) && !request.jobs.length;
-  const queueTrack = (candidateId: string) => {
-    const candidate = request.candidates.find(item => item.id === candidateId);
-    if (candidate?.eligible && matches(candidate) && request.status === "review" && !request.transfers.length && !busy &&
-      confirm(`Queue exactly this file?\n${candidate.path}`))
-      void action(() => send(`/requests/${request.id}/select`, { candidateId }));
+  const canSelectHits = request.status === "review" && !request.transfers.length && !busy;
+  const chosenHits = request.candidates.filter(candidate => selectedHits.has(candidate.id) && candidate.eligible);
+  const chooseHit = (id: string) => {
+    setSelectedHits(current => {
+      const next = new Set(request.type === "track" ? [] : current);
+      if (!current.has(id)) next.add(id);
+      else if (request.type !== "track") next.delete(id);
+      return next;
+    });
   };
-  return <section className="panel request" id={`request-${request.id}`}><div className="panel-heading">
+  const choosePreviewFiles = (previewId: string, paths: Set<string>) =>
+    setSelectedPreviews(current => new Map(current).set(previewId, paths));
+  const downloadHits = () => {
+    if (!canSelectHits || !chosenHits.length) return;
+    const count = chosenHits.length;
+    const total = chosenHits.reduce((sum, candidate) => sum + candidate.size, 0);
+    if (confirm(`Download ${count} selected search hit${count === 1 ? "" : "s"} (${bytes(total)})?`))
+      void action(() => request.type === "track" ?
+        send(`/requests/${request.id}/select`, { candidateId: chosenHits[0]!.id }) :
+        send(`/requests/${request.id}/select-hits`, { candidateIds: chosenHits.map(candidate => candidate.id) }));
+  };
+  return <section className={`panel request${chosenHits.length && canSelectHits ? " has-selection" : ""}`}
+    id={`request-${request.id}`}><div className="panel-heading">
     <div>{!singleQuery && <h2>{request.query_text}</h2>}
       <small>{request.type === "track" ? "Track" : request.type === "search" ? "Files & folders" : "Folder"}
         {request.type !== "search" && ` · ${{ mp3_320: "MP3 320", flac: "FLAC", any: "Any quality" }[request.quality]}`}
@@ -376,6 +393,12 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
       {parsedFilter.error && <small className="warn" role="alert">{parsedFilter.error}</small>}
       {preset === "mp3_320" && <small>Peer-reported 320 kbps MP3. Add iscbr to require confirmed CBR.</small>}
     </div>}
+    {chosenHits.length > 0 && canSelectHits && <div className="search-hit-actions">
+      <span>{chosenHits.length} selected · {bytes(chosenHits.reduce((sum, candidate) => sum + candidate.size, 0))}
+        {chosenHits.some(candidate => !matches(candidate)) && " · includes filtered-out files"}</span>
+      <button className="secondary" onClick={() => setSelectedHits(new Set())}>Clear</button>
+      <button onClick={downloadHits}>Download selected</button>
+    </div>}
     {["failed", "no_results", "review", "cancelled"].includes(request.status) && request.transfers.length === 0 &&
       <details className="retry-options"><summary>{request.status === "review" ? "Search options" : "Retry search"}</summary>
       <div className="retry">{request.type !== "search" && <label>Old quality rule<select value={retryQuality} onChange={event => setRetryQuality(event.target.value as Quality)}>
@@ -393,17 +416,13 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
           {fileDisclosures.allOpen ? "Collapse all" : "Expand all"}</button>}</div>
       <div ref={fileDisclosures.root}>
       {eligibleCount > 0 ? <TrackResultsTable candidates={visibleCandidates.filter(candidate => candidate.eligible)}
-        canQueue={request.status === "review" && !request.transfers.length && !busy} queueTrack={queueTrack}
-        openMenu={(candidateId, x, y) => setTrackMenu({ candidateId, x, y })} /> :
-        visibleCandidates.length > 0 && <p>Older quality rule blocked these files. Use Show all results above.</p>}
+        canSelect={canSelectHits} selected={selectedHits} onSelect={chooseHit} /> :
+        visibleCandidates.length > 0 && <p>No selectable files in this filter.</p>}
       {eligibleCount < visibleCandidates.length && <details className="excluded-results">
-        <summary>Blocked by old quality rule ({visibleCandidates.length - eligibleCount})</summary>
+        <summary>Unavailable files ({visibleCandidates.length - eligibleCount})</summary>
         <TrackResultsTable candidates={visibleCandidates.filter(candidate => !candidate.eligible)}
-          canQueue={false} queueTrack={queueTrack} />
+          canSelect={false} selected={selectedHits} onSelect={chooseHit} />
       </details>}
-      {trackMenu && request.status === "review" && !request.transfers.length && !busy &&
-        <ContextMenu x={trackMenu.x} y={trackMenu.y} label="Download file"
-        onDownload={() => queueTrack(trackMenu.candidateId)} onClose={() => setTrackMenu(null)} />}
       </div></div>}
     {(request.type === "album_folder" || request.type === "search") && request.candidates.length > 0 && <div>
       <div className="result-section-heading"><h3>Folders ({matchingCount + otherCount})</h3>
@@ -413,14 +432,16 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
       <div ref={folderDisclosures.root}>
       {matchingCount > 0 ? <FolderCandidateList request={request} peers={matchingFolders} recursive={recursive}
         canInspect={canInspect} busy={busy} inspecting={inspecting} previewErrors={previewErrors}
-        clearPreviewError={clearPreviewError} action={action} queueTrack={queueTrack}
+        clearPreviewError={clearPreviewError} action={action} selectedHits={selectedHits} onSelectHit={chooseHit}
+        previewSelections={selectedPreviews} onPreviewSelectionChange={choosePreviewFiles}
         matches={matches} filterKey={`${preset}:${filterText}`} /> :
         <p>{parsedFilter.error ? "Fix the filter above to see results." : "No folders match this filter. Select All to see every result."}</p>}
       {otherCount > 0 && <details className="excluded-results">
         <summary>Other folders ({otherCount})</summary>
         <FolderCandidateList request={request} peers={otherFolders} recursive={recursive}
           canInspect={canInspect} busy={busy} inspecting={inspecting} previewErrors={previewErrors}
-          clearPreviewError={clearPreviewError} action={action} queueTrack={queueTrack}
+          clearPreviewError={clearPreviewError} action={action} selectedHits={selectedHits} onSelectHit={chooseHit}
+          previewSelections={selectedPreviews} onPreviewSelectionChange={choosePreviewFiles}
           matches={matches} filterKey={`${preset}:${filterText}`} />
       </details>}
       </div>
@@ -437,11 +458,14 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
 }
 
 function FolderCandidateList({ request, peers, recursive, canInspect, busy, inspecting, previewErrors, clearPreviewError,
-  action, queueTrack, matches, filterKey }: {
+  action, selectedHits, onSelectHit, previewSelections, onPreviewSelectionChange, matches, filterKey }: {
   request: RequestDetail; peers: Map<string, Array<[string, Candidate[]]>>; recursive: boolean;
   canInspect: boolean; busy: boolean; inspecting: ReadonlySet<string>;
   previewErrors: Record<string, string>; clearPreviewError: (key: string) => void;
-  action: (fn: () => Promise<unknown>) => Promise<void>; queueTrack: (candidateId: string) => void;
+  action: (fn: () => Promise<unknown>) => Promise<void>;
+  selectedHits: ReadonlySet<string>; onSelectHit: (candidateId: string) => void;
+  previewSelections: ReadonlyMap<string, ReadonlySet<string>>;
+  onPreviewSelectionChange: (previewId: string, paths: Set<string>) => void;
   matches: (file: Pick<RemoteFile, "path" | "size" | "metadata">) => boolean; filterKey: string;
 }): React.ReactElement {
   return <>{[...peers].sort((a, b) => peerOrder(a[1][0]?.[1][0], b[1][0]?.[1][0])).map(([username, folders]) => <Collapsible className="peer-group" initiallyOpen key={username}>
@@ -452,8 +476,9 @@ function FolderCandidateList({ request, peers, recursive, canInspect, busy, insp
       const visibleHits = hits.filter(matches);
       const visibleFiles = preview?.files.filter(matches) ?? [];
       const previewExpired = preview && Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
-      const showHits = !preview || !visibleFiles.length || previewExpired || Boolean(previewErrors[key]);
-      const hitBytes = visibleHits.reduce((total, file) => total + file.size, 0);
+      const shownHits = !preview || !visibleFiles.length || previewExpired || previewErrors[key] ?
+        visibleHits : searchHitsOutsidePreview(visibleHits, preview, selectedHits);
+      const hitBytes = shownHits.reduce((total, file) => total + file.size, 0);
       return <div className="folder-candidate" key={key}><div className="candidate">
         <span><strong>{candidate.directory || "Shared files"}</strong><small title={candidate.explanation}>Match {Math.round(candidate.score * 100)}%</small></span>
         {canInspect && candidate.directory && <button className="quiet" disabled={busy || inspecting.has(key)} onClick={() => void action(async () => {
@@ -461,27 +486,29 @@ function FolderCandidateList({ request, peers, recursive, canInspect, busy, insp
           clearPreviewError(key);
         })}>{inspecting.has(key) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}
       </div>
-      {preview && visibleFiles.length > 0 && <Preview key={`${preview.id}:${filterKey}`} preview={preview}
+      {preview && visibleFiles.length > 0 && <Preview key={preview.id} preview={preview}
         visibleFiles={visibleFiles} filterActive={filterKey !== "all:"} busy={busy} canQueue={canInspect}
+        selected={previewSelections.get(preview.id) ?? new Set<string>()}
+        onSelectionChange={paths => onPreviewSelectionChange(preview.id, paths)}
         confirmPreview={paths => {
           const count = paths?.length ?? visibleFiles.filter(file => file.eligible).length;
           if (confirm(`Queue ${count} files from ${preview.username}\\${preview.directory}?${preview.excluded_count || count < preview.eligible_count ?
-            ` Partial folder: ${preview.excluded_count} quality-excluded and ${preview.eligible_count - count} unselected.` : ""}`))
+            ` Partial folder: ${preview.excluded_count} unavailable and ${preview.eligible_count - count} unselected.` : ""}`))
             void action(() => send(`/requests/${request.id}/queue-folder`, { previewId: preview.id, selectedPaths: paths }));
         }} />}
-      {showHits &&
+      {shownHits.length > 0 &&
         <div className="folder-search-hits">
-          <small>Search hits{preview ? " (available without inspection)" : " only"} · {visibleHits.length} file{visibleHits.length === 1 ? "" : "s"} · {bytes(hitBytes)}</small>
-          {visibleHits.map(file => {
-            const queueReason = searchHitQueueReason(request, file);
-            return <div className="folder-hit" key={file.id} onContextMenu={event => {
-              if (queueReason || busy) return;
-              event.preventDefault();
-              queueTrack(file.id);
-            }}><span className="folder-hit-name">{basename(file.path)}
-              {queueReason === null ? <button className="quiet" disabled={busy}
-                onClick={() => queueTrack(file.id)}>Queue file</button> :
-                <small className="warn" title={queueReason}>{queueReason}</small>}</span>
+          <small>Search hits{preview ? " (available without inspection)" : " only"} · {shownHits.length} file{shownHits.length === 1 ? "" : "s"} · {bytes(hitBytes)}</small>
+          {shownHits.map(file => {
+            const selectionReason = searchHitSelectionReason(request, file);
+            return <div className="folder-hit" key={file.id}>
+              <label className="folder-tree-select folder-hit-name">
+                <input type="checkbox" aria-label={`Select ${basename(file.path)} from ${file.username}`}
+                  checked={selectedHits.has(file.id)} disabled={selectionReason !== null}
+                  onChange={() => onSelectHit(file.id)} />
+                <span><strong>{basename(file.path)}</strong>
+                  {selectionReason && <small className="warn" title={selectionReason}>{selectionReason}</small>}</span>
+              </label>
             <span className="folder-file-format" title={audioDetails(file.metadata, file.path)}>
               {fileFormat(file.metadata, file.path)}</span><span className="folder-file-size">{bytes(file.size)}</span></div>;
           })}
@@ -503,9 +530,8 @@ function peerDetails(candidate?: Candidate): string {
   return `${speed} · ${slot}${candidate.queue_length ? ` · Q${candidate.queue_length}` : ""}`;
 }
 
-function TrackResultsTable({ candidates, canQueue, queueTrack, openMenu }: {
-  candidates: Candidate[]; canQueue: boolean; queueTrack: (candidateId: string) => void;
-  openMenu?: (candidateId: string, x: number, y: number) => void;
+function TrackResultsTable({ candidates, canSelect, selected, onSelect }: {
+  candidates: Candidate[]; canSelect: boolean; selected: ReadonlySet<string>; onSelect: (candidateId: string) => void;
 }): React.ReactElement {
   const peers = new Map<string, Map<string, Candidate[]>>();
   for (const candidate of [...candidates].sort(peerOrder)) {
@@ -520,25 +546,18 @@ function TrackResultsTable({ candidates, canQueue, queueTrack, openMenu }: {
       {[...directories].map(([directory, files]) => <Collapsible className="directory-group" initiallyOpen key={directory}>
         <summary>{directory || "Shared files"} · {files.length} · {bytes(files.reduce((sum, file) => sum + file.size, 0))}</summary>
         <div className="search-table-wrap"><table className="search-table"><thead><tr>
-          <th>File</th><th>Size</th><th>Type / bitrate</th><th>Match</th><th>Action</th>
-        </tr></thead><tbody>{files.map(candidate => <tr key={candidate.id} tabIndex={canQueue ? 0 : undefined}
-          onContextMenu={event => {
-            if (!canQueue || !openMenu) return;
-            event.preventDefault();
-            openMenu(candidate.id, event.clientX, event.clientY);
-          }}
-          onKeyDown={event => {
-            if (!canQueue || !openMenu || !event.shiftKey || event.key !== "F10") return;
-            event.preventDefault();
-            const rect = event.currentTarget.getBoundingClientRect();
-            openMenu(candidate.id, rect.left + 12, rect.bottom);
-          }}>
-          <td title={candidate.path}><strong>{basename(candidate.path)}</strong></td>
+          <th>File</th><th>Size</th><th>Type / bitrate</th><th>Match</th>
+        </tr></thead><tbody>{files.map(candidate => <tr key={candidate.id}>
+          <td title={candidate.path}><label className="folder-tree-select">
+            <input type="checkbox" aria-label={`Select ${basename(candidate.path)} from ${candidate.username}`}
+              checked={selected.has(candidate.id)} disabled={!canSelect || !candidate.eligible}
+              onChange={() => onSelect(candidate.id)} />
+            <span><strong>{basename(candidate.path)}</strong></span>
+          </label></td>
           <td className="file-size">{bytes(candidate.size)}</td>
           <td title={audioDetails(candidate.metadata, candidate.path)}>{fileFormat(candidate.metadata, candidate.path)}
             {!candidate.eligible && <small className="warn">{candidate.reason}</small>}</td>
           <td title={candidate.explanation}>{Math.round(candidate.score * 100)}%</td>
-          <td>{canQueue && <button onClick={() => queueTrack(candidate.id)}>Queue file</button>}</td>
         </tr>)}</tbody></table></div>
       </Collapsible>)}
     </Collapsible>)}</div>;
@@ -573,7 +592,7 @@ interface FolderTreeNode {
 }
 
 function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue }: {
-  preview: FolderPreview; files: PreviewFile[]; selected: Set<string>; onSelect: (path: string) => void;
+  preview: FolderPreview; files: PreviewFile[]; selected: ReadonlySet<string>; onSelect: (path: string) => void;
   onFileMenu: (event: React.MouseEvent | React.KeyboardEvent, file: PreviewFile) => void; canQueue: boolean;
 }): React.ReactElement {
   const root: FolderTreeNode = { name: preview.directory, directories: new Map(), files: [] };
@@ -622,27 +641,29 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue }
   return <div className="folder-tree-scroll">{render(root)}</div>;
 }
 
-function Preview({ preview, visibleFiles, filterActive, busy, canQueue, confirmPreview }: {
+function Preview({ preview, visibleFiles, filterActive, busy, canQueue, selected, onSelectionChange, confirmPreview }: {
   preview: FolderPreview; visibleFiles: PreviewFile[]; filterActive: boolean;
+  selected: ReadonlySet<string>; onSelectionChange: (paths: Set<string>) => void;
   busy: boolean; canQueue: boolean; confirmPreview: (paths?: string[]) => void;
 }): React.ReactElement {
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const expired = Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
   const canDownload = canQueue && !busy && !expired;
   const eligible = visibleFiles.filter(file => file.eligible);
   const excluded = visibleFiles.filter(file => !file.eligible);
-  const selectedFiles = eligible.filter(file => selected.has(file.path));
+  const selectedFiles = preview.files.filter(file => file.eligible && selected.has(file.path));
+  const visiblePaths = new Set(visibleFiles.map(file => file.path));
+  const hiddenSelected = selectedFiles.filter(file => !visiblePaths.has(file.path)).length;
   const selectedBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
-  const chooseFile = (path: string) => setSelected(current => {
-    const next = new Set(current);
+  const chooseFile = (path: string) => {
+    const next = new Set(selected);
     if (next.has(path)) next.delete(path); else next.add(path);
-    return next;
-  });
+    onSelectionChange(next);
+  };
   const openFileMenu = (event: React.MouseEvent | React.KeyboardEvent, file: PreviewFile) => {
     if (!file.eligible || !canDownload) return;
     event.preventDefault();
-    if (!selected.has(file.path)) setSelected(new Set([file.path]));
+    if (!selected.has(file.path)) onSelectionChange(new Set([file.path]));
     const rect = event.currentTarget.getBoundingClientRect();
     setMenu({ x: "clientX" in event ? event.clientX : rect.left + 12,
       y: "clientY" in event ? event.clientY : rect.bottom });
@@ -651,14 +672,15 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, confirmP
   return <div className="preview folder-preview">
     <div className="folder-summary"><span>{visibleFiles.length}{filterActive && ` of ${preview.files.length}`} file{visibleFiles.length === 1 ? "" : "s"}
       {preview.recursive ? " incl. subfolders" : ""}
-      {excluded.length > 0 && ` · ${eligible.length} selectable · ${excluded.length} blocked`}</span>
+      {excluded.length > 0 && ` · ${eligible.length} selectable · ${excluded.length} unavailable`}
+      {hiddenSelected > 0 && ` · ${hiddenSelected} selected outside this filter`}</span>
       <strong>{bytes(visibleFiles.reduce((sum, file) => sum + file.size, 0))}
         {filterActive && ` shown · ${bytes(preview.audio_bytes)} folder`}</strong></div>
     {eligible.length ? <>
       <div className="folder-tree-columns"><span>File</span><span>Type / bitrate</span><span>Size</span></div>
       <FolderTree preview={preview} files={eligible} selected={selected} onSelect={chooseFile}
         onFileMenu={openFileMenu} canQueue={canDownload} />
-    </> : <small>No selectable files. See the excluded reasons below; for older quality-limited searches, use Show all results above.</small>}
+    </> : <small>No selectable files match this filter. Select All or adjust the filter to see other files.</small>}
     {excluded.length > 0 && <details className="excluded-results">
       <summary>Excluded ({excluded.length}) · {bytes(preview.audio_bytes - preview.eligible_bytes)}</summary>
       <FolderTree preview={preview} files={excluded} selected={selected} onSelect={chooseFile}
@@ -667,7 +689,7 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, confirmP
     {expired && <small className="warn">Preview expired. Refresh this folder before downloading.</small>}
     {canQueue && <div className="folder-actions">
       {selected.size > 0 && <button className="secondary" disabled={!canDownload}
-        onClick={() => setSelected(new Set())}>Clear selection</button>}
+        onClick={() => onSelectionChange(new Set())}>Clear selection</button>}
       <button disabled={!canDownload || (selected.size > 0 ? !selectedFiles.length : !eligible.length)}
         onClick={() => confirmPreview(selected.size ? selectedPaths : eligible.map(file => file.path))}>
         {selected.size ? `Download selected (${selectedFiles.length}, ${bytes(selectedBytes)})` : `Download all (${eligible.length})`}

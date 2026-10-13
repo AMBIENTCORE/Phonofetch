@@ -4,6 +4,14 @@ import { parentDirectory, withinDirectory, unknownMetadata } from "./matching";
 import type { RemoteTransfer, SearchSnapshot, SlskdPort } from "./port";
 
 const finiteSize = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const fileAttributeTypes = {
+  BitRate: 0, Length: 1, VariableBitRate: 2, SampleRate: 4, BitDepth: 5
+} as const;
+const fileAttributeType = z.union([
+  z.number(),
+  z.enum(["BitRate", "Length", "VariableBitRate", "SampleRate", "BitDepth"])
+    .transform(type => fileAttributeTypes[type])
+]);
 const remoteFile = z.object({
   filename: z.string().min(1),
   size: finiteSize,
@@ -11,7 +19,7 @@ const remoteFile = z.object({
   bitDepth: z.number().nullable().optional(),
   sampleRate: z.number().nullable().optional(),
   isVariableBitRate: z.boolean().nullable().optional(),
-  attributes: z.array(z.object({ type: z.number(), value: z.number() })).optional()
+  attributes: z.array(z.object({ type: fileAttributeType, value: z.number() })).optional()
 });
 const directory = z.object({ name: z.string().min(1), files: z.array(z.unknown()) });
 const search = z.object({

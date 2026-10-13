@@ -19,8 +19,12 @@ describe("post-search result filters", () => {
     const mp3Vbr = file("Album\\Song.mp3", 320, true);
     const mp3UnknownMode = file("Album\\Song.mp3", 320, null);
     const flac = file("Album\\Song.flac", null, null);
+    const cover = file("Album\\cover.jpg", null, null);
     expect(matchesResult(mp3Unknown, "all", criteria())).toBe(true);
     expect(matchesResult(flac, "all", criteria())).toBe(true);
+    expect(matchesResult(cover, "all", criteria())).toBe(true);
+    expect(matchesResult(cover, "flac", criteria())).toBe(false);
+    expect(matchesResult(cover, "mp3_320", criteria())).toBe(false);
     expect(matchesResult(mp3Unknown, "mp3_320", criteria())).toBe(false);
     expect(matchesResult(mp3Cbr, "mp3_320", criteria())).toBe(true);
     expect(matchesResult(mp3Vbr, "mp3_320", criteria())).toBe(true);

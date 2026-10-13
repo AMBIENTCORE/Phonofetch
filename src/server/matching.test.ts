@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeAudioMetadata, normalize, parseLines, parentDirectory, qualityCheck, rankFile, rankFolder, withinDirectory, unknownMetadata } from "./matching";
+import { manualSelectionCheck, mergeAudioMetadata, normalize, parseLines, parentDirectory, qualityCheck, rankFile, rankFolder, withinDirectory, unknownMetadata } from "./matching";
 import type { RemoteFile } from "../shared/types";
 
 const file = (path: string, bitrate: number | null = null, vbr: boolean | null = null): RemoteFile =>
@@ -32,6 +32,16 @@ describe("request parsing and matching", () => {
     expect(qualityCheck(file("album\\song.flac"), "flac").eligible).toBe(true);
     expect(qualityCheck(file("album\\cover.jpg"), "any").eligible).toBe(false);
     expect(qualityCheck({ ...file("album\\song.flac"), size: 0 }, "flac").eligible).toBe(false);
+  });
+
+  it("allows explicit manual selection of any file format while rejecting invalid files", () => {
+    for (const extension of ["mp3", "aif", "jpg", "m3u", "nfo", "sfv"]) {
+      expect(manualSelectionCheck(file(`album\\file.${extension}`))).toMatchObject({ eligible: true });
+    }
+    expect(manualSelectionCheck({ ...file("album\\cover.jpg"), size: 0 })).toMatchObject({
+      eligible: false, reason: "File size is missing or invalid"
+    });
+    expect(qualityCheck(file("album\\cover.jpg"), "any").eligible).toBe(false);
   });
 
   it("uses matching search metadata when browsing omits it, but rejects conflicting reports", () => {

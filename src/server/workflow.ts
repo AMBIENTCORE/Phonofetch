@@ -3,7 +3,7 @@ import type { AudioMetadata, Candidate, FolderPreview, MusicRequest, PreviewFile
 import { ApiError } from "./auth";
 import type { Config } from "./config";
 import { Store } from "./db";
-import { mergeAudioMetadata, qualityCheck, rankFolder, withinDirectory } from "./matching";
+import { isSupportedAudioFile, manualSelectionCheck, mergeAudioMetadata, qualityCheck, rankFolder, withinDirectory } from "./matching";
 import type { SlskdPort } from "./port";
 
 export class Workflow {
@@ -25,7 +25,8 @@ export class Workflow {
     });
   }
 
-  async preview(request: MusicRequest, candidate: Candidate, recursive: boolean): Promise<FolderPreview> {
+  async preview(request: MusicRequest, candidate: Candidate, recursive: boolean,
+    automatic = request.mode === "automatic"): Promise<FolderPreview> {
     if (!["album_folder", "search"].includes(request.type) || request.id !== candidate.request_id)
       throw new ApiError(400, "Not a folder candidate");
     this.store.event("info", "folder", "browse_started", "Browsing remote folder", { batchId: request.batch_id, requestId: request.id },
@@ -34,15 +35,19 @@ export class Workflow {
       const all = await this.browseFiles(request, candidate.username, candidate.directory, recursive);
       const bounded = all.filter(file => withinDirectory(file.path, candidate.directory, recursive));
       if (!bounded.length) throw new ApiError(404, "Selected directory is empty or inaccessible");
-      const audio = bounded.filter(file => /\.(mp3|flac|m4a|ogg|opus|wav|aac)$/i.test(file.path));
-      if (!audio.length) throw new ApiError(422, "No supported audio files in this folder");
-      if (audio.length > this.config.MAX_FOLDER_FILES)
-        throw new ApiError(413, `Folder has ${audio.length} audio files; preview limit is ${this.config.MAX_FOLDER_FILES}. Queue an individual search hit or increase MAX_FOLDER_FILES on the NAS.`);
-      const files: PreviewFile[] = audio.map(file => ({ ...file, ...qualityCheck(file, request.quality) })).sort((a, b) => a.path.localeCompare(b.path));
+      const available = automatic ? bounded.filter(file => isSupportedAudioFile(file.path)) : bounded;
+      if (!available.length) throw new ApiError(422, "No supported audio files in this folder");
+      const previewLimit = automatic ? this.config.MAX_FOLDER_FILES : Math.max(1000, this.config.MAX_FOLDER_FILES);
+      if (available.length > previewLimit)
+        throw new ApiError(413, `Folder has ${available.length} files; inspection limit is ${previewLimit}. Select search hits or narrow the folder.`);
+      const files: PreviewFile[] = available.map(file => ({
+        ...file, ...(automatic ? qualityCheck(file, request.quality) : manualSelectionCheck(file))
+      })).sort((a, b) => a.path.localeCompare(b.path));
       if (!Number.isSafeInteger(files.reduce((total, file) => total + file.size, 0)))
         throw new ApiError(413, "Folder size exceeds a reliable byte count");
       const eligibleBytes = files.reduce((total, file) => total + (file.eligible ? file.size : 0), 0);
-      if (eligibleBytes > this.config.MAX_FOLDER_BYTES) throw new ApiError(413, "Eligible files exceed configured size limit");
+      if (automatic && eligibleBytes > this.config.MAX_FOLDER_BYTES)
+        throw new ApiError(413, "Eligible files exceed configured size limit");
       const latest = this.store.get<Pick<MusicRequest, "quality" | "type" | "status">>(
         "SELECT quality,type,status FROM requests WHERE id=?", request.id);
       if (!latest || latest.quality !== request.quality || latest.type !== request.type ||
@@ -51,10 +56,10 @@ export class Workflow {
       const preview = this.store.savePreview({ request_id: request.id, username: candidate.username,
         directory: candidate.directory, recursive, files });
       this.store.event("success", "folder", "browse_completed",
-        `Folder inspected: ${files.length} audio files, ${preview.eligible_count} eligible, ${preview.excluded_count} excluded`,
+        `Folder inspected: ${files.length} files, ${preview.eligible_count} selectable, ${preview.excluded_count} unavailable`,
         { batchId: request.batch_id, requestId: request.id },
-        { directory: candidate.directory, audioBytes: preview.audio_bytes, eligibleBytes,
-          ignoredNonAudio: bounded.length - audio.length });
+        { directory: candidate.directory, folderBytes: preview.audio_bytes, eligibleBytes,
+          ignoredNonAudio: bounded.length - available.length });
       return preview;
     } catch (error) {
       this.store.event("error", "folder", "browse_failed", `Could not inspect folder: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -63,19 +68,22 @@ export class Workflow {
     }
   }
 
-  async queueFolder(request: MusicRequest, preview: FolderPreview, selectedPaths?: string[]): Promise<string> {
+  async queueFolder(request: MusicRequest, preview: FolderPreview, selectedPaths?: string[],
+    automatic = request.mode === "automatic"): Promise<string> {
     if (preview.request_id !== request.id || !["album_folder", "search"].includes(request.type))
       throw new ApiError(400, "Invalid folder preview");
     if (Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000) throw new ApiError(409, "Folder preview expired; inspect again");
-    const eligible = preview.files.filter(file => file.eligible && qualityCheck(file, request.quality).eligible);
-    if (!eligible.length) throw new ApiError(422, "No files meet strict quality criteria");
+    const eligible = preview.files.filter(file => automatic ?
+      file.eligible && qualityCheck(file, request.quality).eligible : manualSelectionCheck(file).eligible);
+    if (!eligible.length) throw new ApiError(422, "No selectable files in this folder");
     if (selectedPaths && new Set(selectedPaths).size !== selectedPaths.length)
       throw new ApiError(400, "Duplicate file selection");
     const included = new Set(selectedPaths ?? eligible.map(file => file.path));
-    if (!included.size) throw new ApiError(422, "Select at least one eligible file");
-    if (included.size > this.config.MAX_FOLDER_FILES ||
-      [...included].some(path => !eligible.some(file => file.path === path)))
-      throw new ApiError(422, "Selection contains files outside this folder or failing strict quality");
+    if (!included.size) throw new ApiError(422, "Select at least one file");
+    if (included.size > this.config.MAX_FOLDER_FILES)
+      throw new ApiError(413, `Select at most ${this.config.MAX_FOLDER_FILES} files at a time`);
+    if ([...included].some(path => !eligible.some(file => file.path === path)))
+      throw new ApiError(422, "Selection contains files outside this folder or unavailable for download");
     const selected = eligible.filter(file => included.has(file.path));
     const selectedBytes = selected.reduce((sum, file) => sum + file.size, 0);
     if (selectedBytes > this.config.MAX_FOLDER_BYTES) throw new ApiError(413, "Selected files exceed configured size limit");
@@ -86,11 +94,13 @@ export class Workflow {
     const evidence = rankFolder(request, preview.directory, preview.files, seed.score);
     const current = await this.browseFiles(request, preview.username, preview.directory, preview.recursive);
     const now = current.filter(file => withinDirectory(file.path, preview.directory, preview.recursive))
-      .filter(file => /\.(mp3|flac|m4a|ogg|opus|wav|aac)$/i.test(file.path))
-      .map(file => ({ ...file, ...qualityCheck(file, request.quality) })).sort((a, b) => a.path.localeCompare(b.path));
+      .filter(file => !automatic || isSupportedAudioFile(file.path))
+      .map(file => ({ ...file, ...(automatic ? qualityCheck(file, request.quality) : manualSelectionCheck(file)) }))
+      .sort((a, b) => a.path.localeCompare(b.path));
     const signature = (files: PreviewFile[]) => JSON.stringify(files.map(file =>
-      [file.username, file.path, file.size, file.metadata, file.eligible]));
-    if (signature(now) !== signature(preview.files)) throw new ApiError(409, "Remote folder changed; inspect again before queueing");
+      [file.username, file.path, file.size, file.metadata, ...(automatic ? [file.eligible] : [])]));
+    if (signature(now) !== signature(preview.files))
+      throw new ApiError(409, "Remote folder changed or was inspected before all files were shown; refresh it before queueing");
     const id = randomUUID();
     this.store.transaction(() => {
       const latest = this.store.get<Pick<MusicRequest, "quality" | "type" | "status">>(
@@ -109,16 +119,18 @@ export class Workflow {
       this.store.run("UPDATE requests SET status='queueing',selected_directory=?,score=?,explanation=?,updated_at=? WHERE id=?",
         preview.directory, evidence.score, evidence.explanation, date, request.id);
       this.store.event("success", "folder", "confirmed",
-        `${selected.length} of ${eligible.length} eligible files selected (${preview.excluded_count} quality-excluded, ${eligible.length - selected.length} unselected)`,
+        `${selected.length} of ${eligible.length} selectable files selected (${preview.excluded_count} unavailable, ${eligible.length - selected.length} unselected)`,
         { batchId: request.batch_id, requestId: request.id, folderJobId: id },
         { directory: preview.directory, username: preview.username, selectedBytes, evidence });
     });
     return id;
   }
 
-  queueTrack(request: MusicRequest, candidate: Candidate): string {
-    if (candidate.request_id !== request.id || !["track", "search"].includes(request.type) || !candidate.eligible ||
-      !qualityCheck(candidate, request.quality).eligible) throw new ApiError(422, "Selected file does not meet strict quality criteria");
+  queueTrack(request: MusicRequest, candidate: Candidate, automatic = request.mode === "automatic"): string {
+    if (candidate.request_id !== request.id || !["track", "search"].includes(request.type) ||
+      automatic && !candidate.eligible ||
+      !(automatic ? qualityCheck(candidate, request.quality) : manualSelectionCheck(candidate)).eligible)
+      throw new ApiError(422, "Selected file is unavailable for download");
     const id = randomUUID();
     this.store.transaction(() => {
       if (this.store.get("SELECT id FROM transfers WHERE request_id=? LIMIT 1", request.id))
@@ -135,11 +147,60 @@ export class Workflow {
     return id;
   }
 
-  private insertTransfer(request: MusicRequest, jobId: string, file: RemoteFile): void {
+  queueSearchHits(request: MusicRequest, candidateIds: string[]): string[] {
+    if (!["search", "album_folder"].includes(request.type)) throw new ApiError(400, "Not a search-hit request");
+    if (!candidateIds.length) throw new ApiError(422, "Select at least one file");
+    if (candidateIds.length > this.config.MAX_FOLDER_FILES) throw new ApiError(413, "Selection exceeds configured file limit");
+    if (new Set(candidateIds).size !== candidateIds.length) throw new ApiError(400, "Duplicate file selection");
+    return this.store.transaction(() => {
+      const latest = this.store.get<Pick<MusicRequest, "status" | "type" | "quality">>(
+        "SELECT status,type,quality FROM requests WHERE id=?", request.id);
+      if (!latest || !["review", "no_results"].includes(latest.status) ||
+        latest.status === "no_results" && request.mode !== "review" ||
+        latest.type !== request.type || latest.quality !== request.quality)
+        throw new ApiError(409, "Search settings changed; select files again");
+      if (this.store.get("SELECT id FROM transfers WHERE request_id=? LIMIT 1", request.id))
+        throw new ApiError(409, "This search already has transfers; no duplicate enqueue");
+      const selected = candidateIds.map(id => {
+        const row = this.store.get<{ id: string; username: string; path: string; directory: string;
+          size: number; metadata: string; eligible: number; score: number }>(
+          "SELECT id,username,path,directory,size,metadata,eligible,score FROM candidates WHERE id=? AND request_id=?",
+          id, request.id);
+        if (!row) throw new ApiError(422, "Selection contains a file outside this search");
+        const file: RemoteFile = { username: row.username, path: row.path, directory: row.directory,
+          size: row.size, metadata: JSON.parse(row.metadata) as AudioMetadata };
+        if (!(request.mode === "automatic" ?
+          row.eligible && qualityCheck(file, request.quality).eligible : manualSelectionCheck(file).eligible))
+          throw new ApiError(422, "Selection contains an ineligible file");
+        return { ...row, file };
+      });
+      const paths = selected.map(item => JSON.stringify([item.username, item.path.replace(/\\/g, "/")]));
+      if (new Set(paths).size !== paths.length) throw new ApiError(400, "Duplicate remote file selection");
+      const totalBytes = selected.reduce((sum, item) => sum + item.file.size, 0);
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > this.config.MAX_FOLDER_BYTES)
+        throw new ApiError(413, "Selected files exceed configured size limit");
+      const ids = selected.map(item => this.insertTransfer(request, null, item.file));
+      for (const item of selected) this.store.run("UPDATE candidates SET selected=1 WHERE id=?", item.id);
+      const date = new Date().toISOString();
+      this.store.run(`UPDATE requests SET status='queueing',selected_candidate_id=?,selected_directory=?,
+        score=?,explanation=?,updated_at=? WHERE id=?`,
+      selected.length === 1 ? selected[0]!.id : null,
+      selected.length === 1 ? selected[0]!.directory : null,
+      selected.length === 1 ? selected[0]!.score : null,
+      `${selected.length} search hits selected`, date, request.id);
+      this.store.event("success", "selection", "hits_selected",
+        `Selected ${selected.length} search hits (${totalBytes} bytes)`,
+        { batchId: request.batch_id, requestId: request.id }, { selectedCount: selected.length, totalBytes });
+      return ids;
+    });
+  }
+
+  private insertTransfer(request: MusicRequest, jobId: string | null, file: RemoteFile): string {
     const date = new Date().toISOString();
     const id = randomUUID();
     this.store.run(`INSERT INTO transfers(id,queue_id,request_id,folder_job_id,username,path,size,status,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,'ready',?,?)`, id, id, request.id, jobId, file.username, file.path, file.size, date, date);
+    return id;
   }
 
   showAllResults(request: MusicRequest): void {
@@ -153,25 +214,24 @@ export class Workflow {
     let available = 0;
     this.store.transaction(() => {
       for (const candidate of candidates) {
-        const result = qualityCheck({ path: candidate.path, size: candidate.size,
-          metadata: JSON.parse(candidate.metadata) as AudioMetadata }, "any");
+        const result = manualSelectionCheck(candidate);
         if (result.eligible) available++;
         this.store.run("UPDATE candidates SET eligible=?,reason=? WHERE id=?",
           Number(result.eligible), result.reason, candidate.id);
       }
       for (const preview of previews) {
         const files = (JSON.parse(preview.files) as PreviewFile[]).map(file => ({
-          ...file, ...qualityCheck(file, "any")
+          ...file, ...manualSelectionCheck(file)
         }));
         this.store.run("UPDATE folder_previews SET files=? WHERE id=?", JSON.stringify(files), preview.id);
       }
       this.store.run(`UPDATE requests SET quality='any',type='search',mode='review',status=?,error=?,updated_at=? WHERE id=?`,
         available ? "review" : "no_results",
-        available ? null : candidates.length ? "No supported audio search hits; inspect folders for more files" :
+        available ? null : candidates.length ? "No selectable search hits; inspect folders for more files" :
           "Soulseek returned no files for this text search",
         new Date().toISOString(), request.id);
       this.store.event("info", "search", "quality_limit_removed",
-        `All audio results enabled without a new search (${available} searchable files)`,
+        `All files enabled without a new search (${available} searchable files)`,
         { batchId: request.batch_id, requestId: request.id });
     });
   }

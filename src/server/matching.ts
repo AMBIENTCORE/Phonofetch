@@ -49,11 +49,21 @@ export function withinDirectory(path: string, directory: string, recursive: bool
     (recursive || !/[\\/]/.test(name));
 }
 
+export function manualSelectionCheck(file: Pick<RemoteFile, "path" | "size">): { eligible: boolean; reason: string } {
+  if (!file.path) return { eligible: false, reason: "File path is missing" };
+  if (!Number.isSafeInteger(file.size) || file.size <= 0)
+    return { eligible: false, reason: "File size is missing or invalid" };
+  return { eligible: true, reason: "Available for manual download" };
+}
+
+export function isSupportedAudioFile(path: string): boolean {
+  return /\.(mp3|flac|m4a|ogg|opus|wav|aac)$/i.test(path);
+}
+
 export function qualityCheck(file: Pick<RemoteFile, "path" | "metadata" | "size">, quality: Quality): { eligible: boolean; reason: string } {
   if (!Number.isSafeInteger(file.size) || file.size <= 0) return { eligible: false, reason: "File size is missing or invalid" };
   const extension = /\.([^.\\/]+)$/.exec(file.path)?.[1]?.toLowerCase() ?? "";
-  const supported = ["mp3", "flac", "m4a", "ogg", "opus", "wav", "aac"];
-  if (!supported.includes(extension)) return { eligible: false, reason: "Not a supported audio file" };
+  if (!isSupportedAudioFile(file.path)) return { eligible: false, reason: "Not a supported audio file" };
   if (quality === "flac")
     return extension === "flac" ? { eligible: true, reason: "FLAC extension (source provenance unverified)" }
       : { eligible: false, reason: "FLAC required" };

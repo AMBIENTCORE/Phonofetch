@@ -178,6 +178,7 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .ok { color: var(--accent); }
 
 .request { scroll-margin-top: 100px; padding: .8rem; }
+.request.has-selection { padding-bottom: 5rem; }
 .request .panel-heading { margin-bottom: .3rem; }
 .request .panel-heading h2 { margin: 0; overflow-wrap: anywhere; }
 .request .panel-heading p { margin: 0; }
@@ -202,6 +203,12 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .result-filters label { flex: 1 1 190px; font-size: .88rem; }
 .result-filters input { min-height: 34px; padding: .3rem .5rem; }
 .result-filters > small { flex-basis: 100%; }
+.search-hit-actions { position: fixed; bottom: .5rem; left: 50%; transform: translateX(-50%); z-index: 8;
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: .35rem;
+  width: max-content; max-width: calc(100vw - 1rem); padding: .4rem; border: 1px solid #777;
+  border-radius: 6px; background: #292a2c; box-shadow: 0 4px 16px #000a; }
+.search-hit-actions span { padding: 0 .3rem; }
+.search-hit-actions button { min-height: 32px; padding: .3rem .55rem; }
 .search-activity .activity-list { margin: .3rem 0; }
 .request .check { padding: .3rem 0; }
 .candidate, .transfer { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-width: 0; padding: .55rem 0; border-top: 1px solid var(--line); }
@@ -234,9 +241,7 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .folder-search-hits { max-height: 125px; overflow: auto; margin-bottom: .5rem; padding: .3rem .5rem; border-left: 2px solid #666; font-size: .88rem; }
 .folder-search-hits small { margin-bottom: .25rem; }
 .folder-hit { display: grid; grid-template-columns: minmax(0, 1fr) minmax(86px, 22%) max-content; align-items: center; gap: .5rem; min-width: 0; padding: .1rem .35rem; }
-.folder-hit span:first-child { min-width: 0; overflow-wrap: anywhere; }
-.folder-hit-name { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .45rem; }
-.folder-hit-name button { min-height: 20px; padding: 0 .25rem; font-size: .86rem; }
+.folder-hit-name { min-width: 0; }
 .folder-preview { margin: 0 0 .55rem; padding: .55rem; }
 .folder-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .3rem .75rem; margin-bottom: .4rem; font-size: .87rem; }
 .folder-tree-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(86px, 22%) max-content;

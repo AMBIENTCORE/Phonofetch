@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Candidate, MusicRequest, RemoteFile, TransferItem } from "../shared/types";
 import type { Config } from "./config";
 import { Store } from "./db";
-import { normalize, qualityCheck, rankFile, rankFolder } from "./matching";
+import { manualSelectionCheck, normalize, qualityCheck, rankFile, rankFolder } from "./matching";
 import type { RemoteTransfer, SlskdPort } from "./port";
 import { Workflow } from "./workflow";
 
@@ -186,7 +186,8 @@ export class Worker {
         dedup.set(`${file.username}\0${file.path}`, file);
       }
       const candidates: Candidate[] = Array.from(dedup.values()).map(file => {
-        const eligibility = qualityCheck(file, request.quality);
+        const eligibility = request.mode === "automatic" ?
+          qualityCheck(file, request.quality) : manualSelectionCheck(file);
         const relevance = rankFile(request, file);
         return { ...file, ...eligibility, ...relevance, request_id: request.id, id: randomUUID(), selected: false };
       }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score ||
@@ -238,7 +239,7 @@ export class Worker {
     if (request.type === "track") {
       const [best, second] = eligible;
       if (best && best.score >= this.config.AUTO_TRACK_SCORE && (!second || best.score - second.score >= 0.1)) {
-        this.workflow.queueTrack(request, best);
+        this.workflow.queueTrack(request, best, true);
         this.store.event("info", "automatic", "selected", `High-confidence track: ${best.explanation}; ${best.reason}`,
           { batchId: request.batch_id, requestId: request.id }, { score: best.score });
       } else this.store.event("warning", "automatic", "left_for_review", "Track confidence or uniqueness below automatic threshold",
@@ -260,11 +261,11 @@ export class Worker {
         { batchId: request.batch_id, requestId: request.id }); return;
     }
     try {
-      const preview = await this.workflow.preview(request, best, false);
+      const preview = await this.workflow.preview(request, best, false, true);
       const evidence = rankFolder(request, best.directory, preview.files, best.score);
       if (evidence.score >= this.config.AUTO_ALBUM_SCORE && preview.eligible_count >= 2 && preview.excluded_count === 0 &&
         preview.files.some(file => file.path === best.path)) {
-        await this.workflow.queueFolder(request, preview);
+        await this.workflow.queueFolder(request, preview, undefined, true);
         this.store.event("info", "automatic", "selected", `Album selected: ${evidence.explanation}; all files quality-eligible`,
           { batchId: request.batch_id, requestId: request.id }, { score: evidence.score });
       } else this.store.event("warning", "automatic", "left_for_review",
@@ -346,13 +347,18 @@ export class Worker {
         if (!request) throw new Error("Request missing");
         const preview = item.folder_job_id ? this.store.get<{ files: string }>(
           "SELECT p.files FROM folder_previews p JOIN folder_jobs j ON j.preview_id=p.id WHERE j.id=?", item.folder_job_id) : undefined;
-        const metadata = preview ? (JSON.parse(preview.files) as Array<RemoteFile & { eligible: boolean }>)
-          .find(file => file.path === item.path)?.metadata :
-          this.store.get<{ metadata: string }>("SELECT metadata FROM candidates WHERE id=?", request.selected_candidate_id)?.metadata;
+        const metadata = item.folder_job_id ?
+          preview && (JSON.parse(preview.files) as Array<RemoteFile & { eligible: boolean }>)
+            .find(file => file.username === item.username && file.path === item.path && file.size === item.size)?.metadata :
+          this.store.get<{ metadata: string }>(`SELECT metadata FROM candidates
+            WHERE request_id=? AND username=? AND path=? AND size=? AND selected=1`,
+          item.request_id, item.username, item.path, item.size)?.metadata;
+        if (!metadata) throw new Error("Selected file metadata missing; refusing to queue");
         const file: RemoteFile = { username: item.username, path: item.path, directory: request.selected_directory ?? "",
-          size: item.size, metadata: typeof metadata === "string" ? JSON.parse(metadata) as RemoteFile["metadata"] :
-            metadata ?? { bitrate: null, sampleRate: null, bitDepth: null, vbr: null } };
-        if (!qualityCheck(file, request.quality).eligible) throw new Error("Stored candidate no longer qualifies; refusing to queue");
+          size: item.size, metadata: typeof metadata === "string" ? JSON.parse(metadata) as RemoteFile["metadata"] : metadata };
+        if (!(request.mode === "automatic" ?
+          qualityCheck(file, request.quality).eligible : manualSelectionCheck(file).eligible))
+          throw new Error("Stored candidate is unavailable for download; refusing to queue");
         const slskdId = await this.port.enqueue(item.username, file, item.queue_id ?? item.id);
         this.store.run("UPDATE transfers SET status='queued',slskd_id=?,updated_at=? WHERE id=?", slskdId, new Date().toISOString(), item.id);
         this.store.event("success", "transfer", "queued", `Queued ${item.path}`,

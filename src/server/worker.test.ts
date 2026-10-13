@@ -98,7 +98,7 @@ describe("worker retries and recovery", () => {
     expect(h.port.startSearch).toHaveBeenCalledTimes(1);
   });
 
-  it("stops a fast search at its deadline and shows already collected, quality-checked files", async () => {
+  it("stops a fast search at its deadline and makes collected files available for manual review", async () => {
     const h = harness();
     h.store.run("UPDATE requests SET search_window_ms=5000 WHERE id=?", h.id);
     const inProgress = { id: "search-id", state: "InProgress", finished: false,
@@ -123,7 +123,7 @@ describe("worker retries and recovery", () => {
     expect(h.getRequest().status).toBe("review");
     expect(h.store.batchDetail(h.getRequest().batch_id)?.requests[0]?.candidates).toMatchObject([
       { path: "Burial\\Untrue\\01 Archangel.flac", eligible: true, upload_speed: 8192, free_slot: true },
-      { path: "Burial\\Untrue\\02 Archangel.mp3", eligible: false }
+      { path: "Burial\\Untrue\\02 Archangel.mp3", eligible: true }
     ]);
     expect(h.port.stopSearch).toHaveBeenCalledOnce();
   });
@@ -257,6 +257,10 @@ describe("worker retries and recovery", () => {
   it("never automatically repeats ambiguous enqueue and later reconciles by stable batch ID", async () => {
     const h = harness();
     h.store.run("UPDATE requests SET status='review' WHERE id=?", h.id);
+    h.store.run(`INSERT INTO candidates(id,request_id,username,path,directory,size,metadata,eligible,reason,score,explanation,selected)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,0)`,
+    h.candidate.id, h.id, h.candidate.username, h.candidate.path, h.candidate.directory, h.candidate.size,
+    JSON.stringify(h.candidate.metadata), 1, h.candidate.reason, h.candidate.score, h.candidate.explanation);
     h.workflow.queueTrack(h.getRequest(), h.candidate);
     vi.mocked(h.port.enqueue).mockRejectedValueOnce(new Error("connection lost after request"));
     await h.worker.runOnce();
