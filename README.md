@@ -49,3 +49,34 @@ sh /volume2/docker/Phonofetch/update.sh --check
 ```
 
 After pushing changes to GitHub, update with `sh /volume2/docker/Phonofetch/update.sh`. It builds the new image, tests non-root access, backs up SQLite, recreates **only** Phonofetch, and checks container health. If the updater itself changes, download and review its new version again. Backups and the database stay on the NAS; live Soulseek behavior depends on your slskd/peer connections.
+
+## Private remote access
+
+Protect `phonofetch.ambientcore.dev` with a Cloudflare Access **Self-hosted** application restricted to your account before adding a tunnel route. Run `cloudflared` as a **separate Compose project** on the NAS, connected to `phonofetch_net`. Set the tunnel's published application service to `http://phonofetch:3000`, with no path; do not change the existing `www` DNS record or forward port 7289.
+
+After reviewing [tunnel.compose.yaml](./scripts/tunnel.compose.yaml) and pushing it to GitHub, copy it to the NAS:
+
+```sh
+curl -fL https://raw.githubusercontent.com/AMBIENTCORE/Phonofetch/main/scripts/tunnel.compose.yaml \
+  -o /volume2/docker/Phonofetch/tunnel.compose.yaml
+```
+
+In the same NAS directory, create a NAS-only `tunnel.env` containing `TUNNEL_TOKEN=` followed by the token from the tunnel's **Add a replica** page. Never commit or send the token in chat. Then run on the NAS:
+
+```sh
+chmod 600 /volume2/docker/Phonofetch/tunnel.env
+docker compose --env-file /volume2/docker/Phonofetch/tunnel.env \
+  -f /volume2/docker/Phonofetch/tunnel.compose.yaml -p phonofetch-tunnel up -d
+```
+
+Set `TRUST_PROXY=true` in Phonofetch's separate NAS-only `.env` and recreate Phonofetch so HTTPS origin checks and secure cookies work. A successful *new-image* NAS update recreates it; if the updater reports an identical image and skips deployment, recreate only Phonofetch:
+
+```sh
+docker compose --env-file /volume2/docker/Phonofetch/.env \
+  -f /volume2/docker/Phonofetch/compose.yaml -p phonofetch \
+  up -d --no-deps --force-recreate phonofetch
+```
+
+Verify the tunnel is Healthy, Cloudflare Access prompts before Phonofetch's own login, and the app works from outside your LAN before linking or redirecting your homepage. Future Phonofetch updates do not recreate the separate tunnel connector.
+
+To use `https://www.ambientcore.dev/phonofetch/` as an entry link after verification, create a Cloudflare **Single Redirect** matching only the `www` hostname and paths `/phonofetch` or `/phonofetch/`, with a 302 target of `https://phonofetch.ambientcore.dev/`. This keeps the homepage intact; the browser's final URL is the subdomain. Add the homepage link once in the separate homepage source. Subsequent Phonofetch image updates need no website deployment.

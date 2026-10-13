@@ -1,0 +1,15 @@
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: phonofetch-cloudflared
+    command: tunnel --no-autoupdate run
+    restart: unless-stopped
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Set TUNNEL_TOKEN in the NAS-only tunnel.env file}
+    networks:
+      - phonofetch_net
+
+networks:
+  phonofetch_net:
+    external: true
+    name: phonofetch_net
