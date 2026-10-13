@@ -92,6 +92,13 @@ nav a.current, nav a:hover { background: #343537; color: #fff; text-decoration: 
 .panel-heading { display: flex; align-items: start; justify-content: space-between; gap: .75rem; margin-bottom: .75rem; }
 .panel-heading > span, .panel-heading small { color: var(--muted); }
 .panel-heading > a { flex: none; font-weight: 600; }
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "\25B6"; display: inline-block; flex: none; width: 1rem; margin-right: .25rem; color: #ddd; }
+details[open] > summary::before { transform: rotate(90deg); }
+details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2px; }
+.disclosure-toolbar { display: flex; justify-content: flex-end; margin: -.4rem 0 .2rem; }
+.disclosure-toolbar button, .result-section-heading button { min-height: 30px; padding: .2rem .5rem; font-size: .86rem; }
 .metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); overflow: hidden; margin-bottom: .85rem; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .metric { display: flex; flex-direction: row-reverse; align-items: center; justify-content: space-between; gap: .3rem; min-width: 0; min-height: 44px; padding: .35rem .6rem; border-right: 1px solid var(--line); }
 .metric:last-child { border-right: 0; }
@@ -105,10 +112,10 @@ nav a.current, nav a:hover { background: #343537; color: #fff; text-decoration: 
 .download-source { overflow-wrap: anywhere; }
 .download-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 .85rem; }
 .download-tree > details { border-top: 1px solid var(--line); }
-.download-tree summary { display: flex; align-items: baseline; justify-content: space-between; gap: .6rem;
+.download-tree summary { display: flex; align-items: baseline; justify-content: flex-start; gap: .35rem;
   padding: .35rem .3rem; cursor: pointer; overflow-wrap: anywhere; }
-.download-tree summary strong { min-width: 0; }
-.download-tree summary small { flex: none; font-variant-numeric: tabular-nums; }
+.download-tree summary strong { min-width: 0; flex: 1 1 auto; }
+.download-tree summary small { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
 .download-folder { margin-left: .7rem; border-top: 1px solid #303133; }
 .download-folder > summary { color: var(--muted); }
 .download-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 30%) 165px 68px;
@@ -183,6 +190,8 @@ nav a.current, nav a:hover { background: #343537; color: #fff; text-decoration: 
 .status.failed, .status.partial, .status.uncertain { background: #48494b; color: #fff; }
 .status.review, .status.no_results { background: #393a3c; color: #eee; }
 .request h3 { margin: .7rem 0 .25rem; }
+.result-section-heading { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.result-section-heading h3 { margin: .65rem 0 .2rem; }
 .retry-options { margin: .3rem 0; }
 .retry-options > summary, .search-activity > summary { padding: .3rem 0; cursor: pointer; color: var(--muted); font-weight: 600; }
 .retry-options .retry { margin: .35rem 0; }

@@ -26,6 +26,39 @@ const bytes = (value: number): string => value < 1024 ? `${value} B` :
   value < 1048576 ? `${(value / 1024).toFixed(1)} KiB` :
     value < 1073741824 ? `${(value / 1048576).toFixed(1)} MiB` : `${(value / 1073741824).toFixed(2)} GiB`;
 const basename = (path: string): string => path.split(/[\\/]/).pop() ?? path;
+
+function Collapsible({ children, initiallyOpen, className }: {
+  children: React.ReactNode; initiallyOpen: boolean; className?: string;
+}): React.ReactElement {
+  const [open, setOpen] = useState(initiallyOpen);
+  return <details className={className} open={open}
+    onToggle={event => setOpen(event.currentTarget.open)}>{children}</details>;
+}
+
+function useDisclosureGroup(version: string) {
+  const root = useRef<HTMLDivElement>(null);
+  const [allOpen, setAllOpen] = useState(false);
+  const sync = () => {
+    const details = Array.from(root.current?.querySelectorAll("details") ?? []);
+    setAllOpen(details.length > 0 && details.every(item => item.open));
+  };
+  useEffect(() => {
+    sync();
+    const container = root.current;
+    if (!container) return;
+    const onToggle = () => queueMicrotask(sync);
+    container.addEventListener("toggle", onToggle, true);
+    return () => container.removeEventListener("toggle", onToggle, true);
+  }, [version]);
+  const toggle = () => {
+    const details = Array.from(root.current?.querySelectorAll("details") ?? []);
+    const open = details.some(item => !item.open);
+    for (const item of details) item.open = open;
+    setAllOpen(open);
+  };
+  return { root, allOpen, toggle };
+}
+
 function App(): React.ReactElement {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [username, setUsername] = useState("");
@@ -308,6 +341,9 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   const otherCount = [...otherFolders.values()].reduce((count, folders) => count + folders.length, 0);
   const visibleCandidates = request.candidates.filter(matches);
   const eligibleCount = visibleCandidates.filter(candidate => candidate.eligible).length;
+  const fileDisclosures = useDisclosureGroup(`${request.id}:${request.type}:files:${visibleCandidates.length}:${preset}:${filterText}`);
+  const folderDisclosures = useDisclosureGroup(
+    `${request.id}:${request.type}:folders:${request.candidates.length}:${request.previews.length}:${recursive}:${preset}:${filterText}`);
   const canInspect = ["review", "no_results"].includes(request.status) && !request.jobs.length;
   const queueTrack = (candidateId: string) => {
     const candidate = request.candidates.find(item => item.id === candidateId);
@@ -351,7 +387,11 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
             void action(() => send(`/requests/${request.id}/retry`,
               { quality: request.type === "search" ? "any" : retryQuality, longer: true }));
         }}>Search longer</button></div></details>}
-    {request.type === "track" && request.candidates.length > 0 && <div><h3>Files ({visibleCandidates.length})</h3>
+    {request.type === "track" && request.candidates.length > 0 && <div>
+      <div className="result-section-heading"><h3>Files ({visibleCandidates.length})</h3>
+        {visibleCandidates.length > 0 && <button className="secondary" type="button" onClick={fileDisclosures.toggle}>
+          {fileDisclosures.allOpen ? "Collapse all" : "Expand all"}</button>}</div>
+      <div ref={fileDisclosures.root}>
       {eligibleCount > 0 ? <TrackResultsTable candidates={visibleCandidates.filter(candidate => candidate.eligible)}
         canQueue={request.status === "review" && !request.transfers.length && !busy} queueTrack={queueTrack}
         openMenu={(candidateId, x, y) => setTrackMenu({ candidateId, x, y })} /> :
@@ -364,10 +404,13 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
       {trackMenu && request.status === "review" && !request.transfers.length && !busy &&
         <ContextMenu x={trackMenu.x} y={trackMenu.y} label="Download file"
         onDownload={() => queueTrack(trackMenu.candidateId)} onClose={() => setTrackMenu(null)} />}
-    </div>}
+      </div></div>}
     {(request.type === "album_folder" || request.type === "search") && request.candidates.length > 0 && <div>
-      <h3>Folders ({matchingCount + otherCount})</h3>
+      <div className="result-section-heading"><h3>Folders ({matchingCount + otherCount})</h3>
+        {matchingCount + otherCount > 0 && <button className="secondary" type="button" onClick={folderDisclosures.toggle}>
+          {folderDisclosures.allOpen ? "Collapse all" : "Expand all"}</button>}</div>
       <label className="check"><input type="checkbox" checked={recursive} onChange={event => setRecursive(event.target.checked)} /> Include subfolders</label>
+      <div ref={folderDisclosures.root}>
       {matchingCount > 0 ? <FolderCandidateList request={request} peers={matchingFolders} recursive={recursive}
         canInspect={canInspect} busy={busy} inspecting={inspecting} previewErrors={previewErrors}
         clearPreviewError={clearPreviewError} action={action} queueTrack={queueTrack}
@@ -380,6 +423,7 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
           clearPreviewError={clearPreviewError} action={action} queueTrack={queueTrack}
           matches={matches} filterKey={`${preset}:${filterText}`} />
       </details>}
+      </div>
     </div>}
     {request.jobs.map(job => <div key={job.id} className="job"><h3>Folder job · {job.status}</h3>
       <p>{job.username} · {job.directory} · selected {bytes(job.estimated_bytes)}</p>
@@ -400,7 +444,7 @@ function FolderCandidateList({ request, peers, recursive, canInspect, busy, insp
   action: (fn: () => Promise<unknown>) => Promise<void>; queueTrack: (candidateId: string) => void;
   matches: (file: Pick<RemoteFile, "path" | "size" | "metadata">) => boolean; filterKey: string;
 }): React.ReactElement {
-  return <>{[...peers].sort((a, b) => peerOrder(a[1][0]?.[1][0], b[1][0]?.[1][0])).map(([username, folders]) => <details className="peer-group" open key={username}>
+  return <>{[...peers].sort((a, b) => peerOrder(a[1][0]?.[1][0], b[1][0]?.[1][0])).map(([username, folders]) => <Collapsible className="peer-group" initiallyOpen key={username}>
     <summary>{username}{folders.length > 1 ? ` (${folders.length})` : ""} · {peerDetails(folders[0]?.[1][0])}</summary>{folders.map(([key, hits]) => {
       const candidate = hits[0]!;
       const preview = request.previews.find(item =>
@@ -440,7 +484,7 @@ function FolderCandidateList({ request, peers, recursive, canInspect, busy, insp
         </div>}
       {previewErrors[key] && !preview && <small role="alert" className="warn">Inspection failed: {previewErrors[key]}. Select Inspect to retry.</small>}
       </div>;
-    })}</details>)}</>;
+    })}</Collapsible>)}</>;
 }
 
 function peerOrder(a?: Candidate, b?: Candidate): number {
@@ -468,8 +512,8 @@ function TrackResultsTable({ candidates, canQueue, queueTrack, openMenu }: {
     directories.set(candidate.directory, files);
   }
   return <div className="search-results">{[...peers].map(([username, directories]) =>
-    <details className="peer-group" open key={username}><summary>{username} · {peerDetails([...directories.values()][0]?.[0])}</summary>
-      {[...directories].map(([directory, files]) => <details className="directory-group" open key={directory}>
+    <Collapsible className="peer-group" initiallyOpen key={username}><summary>{username} · {peerDetails([...directories.values()][0]?.[0])}</summary>
+      {[...directories].map(([directory, files]) => <Collapsible className="directory-group" initiallyOpen key={directory}>
         <summary>{directory || "Shared files"} · {files.length} · {bytes(files.reduce((sum, file) => sum + file.size, 0))}</summary>
         <div className="search-table-wrap"><table className="search-table"><thead><tr>
           <th>File</th><th>Size</th><th>Type / bitrate</th><th>Match</th><th>Action</th>
@@ -492,8 +536,8 @@ function TrackResultsTable({ candidates, canQueue, queueTrack, openMenu }: {
           <td title={candidate.explanation}>{Math.round(candidate.score * 100)}%</td>
           <td>{canQueue && <button onClick={() => queueTrack(candidate.id)}>Queue file</button>}</td>
         </tr>)}</tbody></table></div>
-      </details>)}
-    </details>)}</div>;
+      </Collapsible>)}
+    </Collapsible>)}</div>;
 }
 
 function ContextMenu({ x, y, label, onDownload, onClose }: {
@@ -554,7 +598,7 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue }
     return <ul className="folder-tree">
       {[...node.directories.values()].sort((a, b) => a.name.localeCompare(b.name)).map(child => {
         const total = totals(child);
-        return <li key={child.name}><details open><summary>{child.name}/ <small>{total.count} file{total.count === 1 ? "" : "s"} · {bytes(total.size)}</small></summary>{render(child)}</details></li>;
+        return <li key={child.name}><Collapsible initiallyOpen><summary>{child.name}/ <small>{total.count} file{total.count === 1 ? "" : "s"} · {bytes(total.size)}</small></summary>{render(child)}</Collapsible></li>;
       })}
       {node.files.map(file => {
         const details = audioDetails(file.metadata, file.path);
@@ -601,7 +645,7 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, confirmP
   };
   const selectedPaths = selectedFiles.map(file => file.path);
   return <div className="preview folder-preview">
-    <div className="folder-summary"><span>{visibleFiles.length}{filterActive && ` of ${preview.files.length}`} files
+    <div className="folder-summary"><span>{visibleFiles.length}{filterActive && ` of ${preview.files.length}`} file{visibleFiles.length === 1 ? "" : "s"}
       {preview.recursive ? " incl. subfolders" : ""}
       {excluded.length > 0 && ` · ${eligible.length} selectable · ${excluded.length} blocked`}</span>
       <strong>{bytes(visibleFiles.reduce((sum, file) => sum + file.size, 0))}
@@ -645,6 +689,7 @@ function TransferActions({ transfer, action, busy }: { transfer: TransferItem;
 function DownloadTree({ items, action, busy, expandFolders }: { items: DownloadItem[];
   action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean; expandFolders: boolean;
 }): React.ReactElement {
+  const disclosures = useDisclosureGroup(items.map(item => `${item.id}:${item.status}`).join("|"));
   const peers = new Map<string, Map<string, DownloadItem[]>>();
   for (const item of items) {
     let folders = peers.get(item.username);
@@ -654,17 +699,19 @@ function DownloadTree({ items, action, busy, expandFolders }: { items: DownloadI
     files.push(item);
     folders.set(directory, files);
   }
-  return <div className="download-tree">{[...peers].map(([username, folders]) => {
+  return <><div className="disclosure-toolbar"><button className="secondary" type="button"
+    onClick={disclosures.toggle}>{disclosures.allOpen ? "Collapse all" : "Expand all"}</button></div>
+    <div className="download-tree" ref={disclosures.root}>{[...peers].map(([username, folders]) => {
     const peerFiles = [...folders.values()].flat();
-    return <details className="download-peer" open key={username}>
+    return <Collapsible className="download-peer" initiallyOpen key={username}>
       <summary><strong>{username}</strong><small>{peerFiles.length} file{peerFiles.length === 1 ? "" : "s"} · {bytes(peerFiles.reduce((sum, file) => sum + file.size, 0))}</small></summary>
-      {[...folders].map(([directory, files]) => <details className="download-folder" open={expandFolders} key={directory}>
+      {[...folders].map(([directory, files]) => <Collapsible className="download-folder" initiallyOpen={expandFolders} key={directory}>
         <summary><strong title={directory}>{directory || "Shared files"}</strong>
           <small>{files.length} file{files.length === 1 ? "" : "s"} · {bytes(files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
         {files.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy} />)}
-      </details>)}
-    </details>;
-  })}</div>;
+      </Collapsible>)}
+    </Collapsible>;
+  })}</div></>;
 }
 
 function DownloadRow({ item, action, busy }: { item: DownloadItem;
