@@ -151,9 +151,7 @@ function App(): React.ReactElement {
 function DownloadMetrics({ stats }: { stats?: DownloadStats }): React.ReactElement {
   const metrics = [
     { label: "Downloaded since reset", value: stats ? bytes(stats.completed_bytes) : "…" },
-    { label: "Completed files", value: stats?.completed_count ?? "…" },
-    { label: "Active transfers", value: stats?.active_count ?? "…" },
-    { label: "Active transferred", value: stats ? bytes(stats.active_transferred_bytes) : "…" }
+    { label: "Completed files", value: stats?.completed_count ?? "…" }
   ];
   return <div className="metrics download-metrics">{metrics.map(metric =>
     <div className="metric" key={metric.label}><strong>{metric.value}</strong><span>{metric.label}</span></div>)}</div>;
