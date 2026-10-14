@@ -12,7 +12,8 @@ export function batchName(number: number, search: string, count: number): string
 }
 
 export type DownloadSort = "newest" | "oldest" | "largest" | "smallest" |
-  "pathAsc" | "pathDesc" | "peerAsc" | "peerDesc" | "statusAsc" | "statusDesc";
+  "pathAsc" | "pathDesc" | "peerAsc" | "peerDesc" | "statusAsc" | "statusDesc" |
+  "queuedAsc" | "queuedDesc";
 
 export class Store {
   readonly db: DatabaseSync;
@@ -234,11 +235,13 @@ export class Store {
     return stats;
   }
 
-  downloads(activeLimit: number, finishedLimit: number, sort: DownloadSort = "newest"): DownloadsData {
+  downloads(activeLimit: number, finishedLimit: number,
+    activeSort: DownloadSort = "queuedAsc", finishedSort: DownloadSort = "newest"): DownloadsData {
     const from = `FROM transfers t JOIN requests r ON r.id=t.request_id JOIN batches b ON b.id=r.batch_id`;
     const fields = `SELECT t.*,r.batch_id,r.query_text,b.number AS batch_number ${from}`;
-    const order = {
+    const orders: Record<DownloadSort, string> = {
       newest: "t.updated_at DESC,t.id DESC", oldest: "t.updated_at ASC,t.id ASC",
+      queuedAsc: "t.created_at ASC,t.rowid ASC", queuedDesc: "t.created_at DESC,t.rowid DESC",
       largest: "t.size DESC,t.updated_at DESC,t.id DESC",
       smallest: "t.size ASC,t.updated_at DESC,t.id DESC",
       pathAsc: "t.path COLLATE NOCASE ASC,t.id DESC", pathDesc: "t.path COLLATE NOCASE DESC,t.id DESC",
@@ -246,12 +249,12 @@ export class Store {
       peerDesc: "t.username COLLATE NOCASE DESC,t.updated_at DESC,t.id DESC",
       statusAsc: "t.status COLLATE NOCASE ASC,t.updated_at DESC,t.id DESC",
       statusDesc: "t.status COLLATE NOCASE DESC,t.updated_at DESC,t.id DESC"
-    }[sort];
+    };
     const activeWhere = "t.hidden_from_downloads=0 AND t.status IN ('ready','queueing','queued','active','uncertain')";
     const finishedWhere = "t.hidden_from_downloads=0 AND t.status IN ('completed','failed','cancelled')";
     return {
-      active: this.all<DownloadItem>(`${fields} WHERE ${activeWhere} ORDER BY ${order} LIMIT ?`, activeLimit),
-      finished: this.all<DownloadItem>(`${fields} WHERE ${finishedWhere} ORDER BY ${order} LIMIT ?`, finishedLimit),
+      active: this.all<DownloadItem>(`${fields} WHERE ${activeWhere} ORDER BY ${orders[activeSort]} LIMIT ?`, activeLimit),
+      finished: this.all<DownloadItem>(`${fields} WHERE ${finishedWhere} ORDER BY ${orders[finishedSort]} LIMIT ?`, finishedLimit),
       active_total: this.get<{ count: number }>(`SELECT COUNT(*) AS count ${from} WHERE ${activeWhere}`)?.count ?? 0,
       finished_total: this.get<{ count: number }>(`SELECT COUNT(*) AS count ${from} WHERE ${finishedWhere}`)?.count ?? 0,
       stats: this.downloadStats()

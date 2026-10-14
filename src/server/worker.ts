@@ -334,7 +334,8 @@ export class Worker {
   private async enqueueReady(live: RemoteTransfer[]): Promise<void> {
     const byKey = new Map(live.map(item => [`${item.username}\0${item.path}`, item]));
     const byBatch = new Map(live.filter(item => item.batchId).map(item => [item.batchId, item]));
-    const ready = this.store.all<TransferItem>("SELECT * FROM transfers WHERE status='ready' ORDER BY created_at LIMIT 20");
+    const ready = this.store.all<TransferItem>(
+      "SELECT * FROM transfers WHERE status='ready' ORDER BY created_at,rowid LIMIT 20");
     for (const item of ready) {
       const samePath = byKey.get(`${item.username}\0${item.path}`);
       const existing = byBatch.get(item.queue_id ?? item.id) ??

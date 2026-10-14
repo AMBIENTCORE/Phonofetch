@@ -4,7 +4,9 @@ import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsDa
 import { parentDirectory, parseLines } from "../server/matching";
 import { readApiResponse } from "./api-response";
 import { audioDetails, fileFormat } from "./audio-details";
+import { groupDownloads } from "./download-groups";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
+import { observedRate, predictedProgress, type ProgressSample } from "./progress-estimate";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import { searchDraftQuery } from "./search-navigation";
 import { sortRows, toggleSort, type SortState } from "./table-sort";
@@ -178,12 +180,13 @@ function DownloadMetrics({ stats }: { stats?: DownloadStats }): React.ReactEleme
 }
 
 type ActivitySortKey = "date" | "severity" | "category" | "message";
-type DownloadSortKey = "file" | "peer" | "status" | "size" | "updated";
+type DownloadSortKey = "file" | "peer" | "status" | "size" | "queued" | "updated";
 const downloadSortValues: Record<DownloadSortKey, Record<"asc" | "desc", DownloadSort>> = {
   file: { asc: "pathAsc", desc: "pathDesc" },
   peer: { asc: "peerAsc", desc: "peerDesc" },
   status: { asc: "statusAsc", desc: "statusDesc" },
   size: { asc: "smallest", desc: "largest" },
+  queued: { asc: "queuedAsc", desc: "queuedDesc" },
   updated: { asc: "oldest", desc: "newest" }
 };
 
@@ -196,6 +199,16 @@ function SortHeading<Key extends string>({ label, column, sort, onSort }: {
       {label}{current && <span className="sort-arrow" aria-hidden="true">{sort.direction === "asc" ? "↑" : "↓"}</span>}
     </button>
   </th>;
+}
+
+function DownloadGroupHeading({ group, columns }: {
+  group: ReturnType<typeof groupDownloads>[number]; columns: number;
+}): React.ReactElement {
+  return <tr className="download-group-heading"><th scope="rowgroup" colSpan={columns}>
+    <span><a href={`#/search/${group.batchId}`}>{group.label}</a></span>
+    <small>{group.files.length} file{group.files.length === 1 ? "" : "s"} · {
+      bytes(group.files.reduce((sum, file) => sum + file.size, 0))}</small>
+  </th></tr>;
 }
 
 function Dashboard({ reload, action, busy }: {
@@ -286,13 +299,19 @@ function Dashboard({ reload, action, busy }: {
           onSort={key => setDownloadSort(current => toggleSort(current, key, "updated"))} />
         <SortHeading label="Updated" column="updated" sort={downloadSort}
           onSort={key => setDownloadSort(current => toggleSort(current, key, "updated"))} />
-      </tr></thead><tbody>{recentDownloads.slice(0, downloadLimit).map(item => <tr key={item.id}>
-        <td data-label="File"><strong title={item.path}>{basename(item.path)}</strong><small><a
-          href={`#/search/${item.batch_id}?request=${item.request_id}`}>Search #{item.batch_number}</a></small></td>
-        <td data-label="Peer">{item.username}</td><td data-label="Status">{item.status.replace("_", " ")}</td>
-        <td data-label="Size">{bytes(item.size)}</td>
-        <td data-label="Updated"><time dateTime={item.updated_at}>{time(item.updated_at)}</time></td>
-      </tr>)}</tbody></table></div> : <p className="empty">{data ? "No matching downloads." : "Loading downloads…"}</p>}
+      </tr></thead>{groupDownloads(recentDownloads.slice(0, downloadLimit)).map(group =>
+        <tbody key={group.batchId}>
+          <DownloadGroupHeading group={group} columns={5} />
+          {group.files.map(item => <tr key={item.id}>
+            <td data-label="File"><strong title={item.path}>{basename(item.path)}</strong>
+              {group.multipleQueries && <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>
+                View query</a></small>}</td>
+            <td data-label="Peer">{item.username}</td><td data-label="Status">{item.status.replace("_", " ")}</td>
+            <td data-label="Size">{bytes(item.size)}</td>
+            <td data-label="Updated"><time dateTime={item.updated_at}>{time(item.updated_at)}</time></td>
+          </tr>)}
+        </tbody>)}</table></div> :
+        <p className="empty">{data ? "No matching downloads." : "Loading downloads…"}</p>}
       {recentDownloads.length > downloadLimit && <button className="secondary table-more"
         onClick={() => setDownloadLimit(limit => limit + 8)}>Show more downloads</button>}
     </section>
@@ -313,17 +332,19 @@ function DownloadsPage({ reload, action, busy }: {
   reload: number; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
 }): React.ReactElement {
   const mobile = useMobileLayout();
-  const [data, setData] = useState<DownloadsData>();
+  const [snapshot, setSnapshot] = useState<{ downloads: DownloadsData; receivedAt: number }>();
+  const data = snapshot?.downloads;
   const [error, setError] = useState("");
   const [activeLimit, setActiveLimit] = useState(50);
   const [finishedLimit, setFinishedLimit] = useState(50);
-  const [sort, setSort] = useState<SortState<DownloadSortKey>>({ key: "updated", direction: "desc" });
+  const [activeSort, setActiveSort] = useState<SortState<DownloadSortKey>>({ key: "queued", direction: "asc" });
+  const [finishedSort, setFinishedSort] = useState<SortState<DownloadSortKey>>({ key: "updated", direction: "desc" });
   const [view, setView] = useState<"table" | "grouped">("table");
   const [filterText, setFilterText] = useState("");
   const [mobileView, setMobileView] = useState<"active" | "finished" | null>(null);
   const selectedView = mobileView ?? (data?.active_total === 0 && data.finished_total > 0 ? "finished" : "active");
   const matches = (item: DownloadItem) => matchesText(filterText, item.path, item.username, item.query_text,
-    item.status, bytes(item.size), time(item.updated_at));
+    item.status, bytes(item.size), time(item.created_at), time(item.updated_at));
   const visibleActive = data?.active.filter(matches) ?? [];
   const visibleFinished = data?.finished.filter(matches) ?? [];
   const clearFinished = () => {
@@ -336,11 +357,14 @@ function DownloadsPage({ reload, action, busy }: {
   };
   useEffect(() => {
     let mounted = true;
-    api<DownloadsData>(`/downloads?activeLimit=${activeLimit}&finishedLimit=${finishedLimit}&sort=${downloadSortValues[sort.key][sort.direction]}`)
-      .then(result => { if (mounted) { setData(result); setError(""); } })
+    api<DownloadsData>(`/downloads?activeLimit=${activeLimit}&finishedLimit=${finishedLimit}` +
+      `&activeSort=${downloadSortValues[activeSort.key][activeSort.direction]}` +
+      `&finishedSort=${downloadSortValues[finishedSort.key][finishedSort.direction]}`)
+      .then(result => { if (mounted) { setSnapshot({ downloads: result, receivedAt: performance.now() }); setError(""); } })
       .catch(err => { if (mounted) setError(String(err)); });
     return () => { mounted = false; };
-  }, [reload, activeLimit, finishedLimit, sort.key, sort.direction]);
+  }, [reload, activeLimit, finishedLimit, activeSort.key, activeSort.direction,
+    finishedSort.key, finishedSort.direction]);
   return <><div className="page-title"><div><h1>Downloads</h1><p>slskd transfers; clearing this view never deletes downloaded files.</p></div></div>
     <p role="alert">{error}</p>
     <DownloadMetrics stats={data?.stats} />
@@ -357,19 +381,10 @@ function DownloadsPage({ reload, action, busy }: {
         <button type="button" className={view === "grouped" ? "current" : "secondary"}
           aria-pressed={view === "grouped"} onClick={() => setView("grouped")}>Grouped</button>
       </div>
-      <small>Column headings sort files before loading more; grouped peers follow their first file.
+      <small>Ongoing files start in queue order; finished files start newest first. Headings sort before loading more;
+        search groups follow their first sorted file.
         {filterText && " Filtering loaded entries; load more to include additional files."}</small>
     </div>
-    {view === "grouped" && <div className="grouped-sort-headers" role="group" aria-label="Sort grouped downloads">
-      {([["file", "File / path"], ["peer", "Peer"], ["status", "Status"],
-        ["size", "Size"], ["updated", "Updated"]] as const).map(([key, label]) =>
-        <button key={key} type="button" className={`grouped-sort-heading${sort.key === key ? " current" : ""}`}
-          aria-pressed={sort.key === key}
-          onClick={() => setSort(current => toggleSort(current, key, "updated"))}>
-          {label}{sort.key === key &&
-            <span className="sort-arrow" aria-hidden="true">{sort.direction === "asc" ? "↑" : "↓"}</span>}
-        </button>)}
-    </div>}
     <div className="mobile-download-tabs" role="group" aria-label="Download status">
       <button type="button" className={selectedView === "active" ? "current" : ""} aria-pressed={selectedView === "active"}
         onClick={() => setMobileView("active")}>Active <span>{data?.active_total ?? 0}</span></button>
@@ -380,22 +395,29 @@ function DownloadsPage({ reload, action, busy }: {
       <div className="panel-heading"><h2>Ongoing / needs attention</h2>
       <small>{filterText && `${visibleActive.length} shown of `}{data?.active_total ?? 0} transfers
         {data?.stats.uncertain_count ? ` · ${data.stats.uncertain_count} uncertain` : ""}</small></div>
+      {view === "grouped" && !!visibleActive.length && <GroupedDownloadSort sort={activeSort} dateColumn="queued"
+        onSort={key => setActiveSort(current => toggleSort(current, key, "updated"))} />}
       {!visibleActive.length ? <p className="empty">{data ?
         filterText ? "No matching loaded ongoing downloads." : "No ongoing downloads." : "Loading downloads…"}</p> :
         view === "table" ? <DownloadTable items={visibleActive} action={action} busy={busy}
-          sort={sort} onSort={key => setSort(current => toggleSort(current, key, "updated"))} /> :
-          <DownloadTree items={visibleActive} action={action} busy={busy} expandFolders />}
+          sort={activeSort} dateColumn="queued" sampleAt={snapshot!.receivedAt}
+          onSort={key => setActiveSort(current => toggleSort(current, key, "updated"))} /> :
+          <DownloadTree items={visibleActive} action={action} busy={busy} expandFolders
+            sampleAt={snapshot!.receivedAt} />}
       {data && data.active_total > data.active.length && <button className="secondary" onClick={() => setActiveLimit(limit => limit + 50)}>Load more ongoing</button>}
     </section>
     <section className={`panel download-section${selectedView === "finished" ? " mobile-selected" : ""}`}>
       <div className="panel-heading"><h2>Finished</h2>
       <small>{filterText && `${visibleFinished.length} shown of `}{data?.finished_total ?? 0} in list</small></div>
+      {view === "grouped" && !!visibleFinished.length && <GroupedDownloadSort sort={finishedSort} dateColumn="updated"
+        onSort={key => setFinishedSort(current => toggleSort(current, key, "updated"))} />}
       {!visibleFinished.length ? <p className="empty">{data ?
         filterText ? "No matching loaded finished downloads." : "No finished downloads in the list." : "Loading downloads…"}</p> :
         view === "table" ? <DownloadTable items={visibleFinished} action={action} busy={busy}
-          sort={sort} onSort={key => setSort(current => toggleSort(current, key, "updated"))} /> :
+          sort={finishedSort} dateColumn="updated" sampleAt={snapshot!.receivedAt}
+          onSort={key => setFinishedSort(current => toggleSort(current, key, "updated"))} /> :
           <DownloadTree items={visibleFinished} action={action} busy={busy}
-            expandFolders={mobile && visibleFinished.length <= 10} />}
+            expandFolders={mobile && visibleFinished.length <= 10} sampleAt={snapshot!.receivedAt} />}
       {data && data.finished_total > data.finished.length && <button className="secondary" onClick={() => setFinishedLimit(limit => limit + 50)}>Load more finished</button>}
     </section>
     <details className="mobile-download-options"><summary>Manage downloads</summary>
@@ -1010,66 +1032,120 @@ function TransferActions({ transfer, action, busy }: { transfer: TransferItem;
     }}>Retry file</button>}</>;
 }
 
-function DownloadTree({ items, action, busy, expandFolders }: { items: DownloadItem[];
-  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean; expandFolders: boolean;
+function GroupedDownloadSort({ sort, dateColumn, onSort }: {
+  sort: SortState<DownloadSortKey>; dateColumn: "queued" | "updated";
+  onSort: (key: DownloadSortKey) => void;
 }): React.ReactElement {
-  const disclosures = useDisclosureGroup(items.map(item => `${item.id}:${item.status}`).join("|"));
-  const peers = new Map<string, Map<string, DownloadItem[]>>();
-  for (const item of items) {
-    let folders = peers.get(item.username);
-    if (!folders) { folders = new Map(); peers.set(item.username, folders); }
-    const directory = parentDirectory(item.path);
-    const files = folders.get(directory) ?? [];
-    files.push(item);
-    folders.set(directory, files);
-  }
-  return <><div className="disclosure-toolbar"><button className="secondary" type="button"
-    onClick={disclosures.toggle}>{disclosures.allOpen ? "Collapse all" : "Expand all"}</button></div>
-    <div className="download-tree" ref={disclosures.root}>{[...peers].map(([username, folders]) => {
-    const peerFiles = [...folders.values()].flat();
-    return <Collapsible className="download-peer" initiallyOpen key={username}>
-      <summary><strong>{username}</strong><small>{peerFiles.length} file{peerFiles.length === 1 ? "" : "s"} · {bytes(peerFiles.reduce((sum, file) => sum + file.size, 0))}</small></summary>
-      {[...folders].map(([directory, files]) => <Collapsible className="download-folder" initiallyOpen={expandFolders} key={directory}>
-        <summary><strong className="download-directory-desktop" title={directory}>{directory || "Shared files"}</strong>
-          <strong className="download-directory-mobile" title={directory}>{basename(directory) || "Shared files"}</strong>
-          <small>{files.length} file{files.length === 1 ? "" : "s"} · {bytes(files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
-        <small className="download-directory-path">{directory}</small>
-        {files.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy} />)}
-      </Collapsible>)}
-    </Collapsible>;
-  })}</div></>;
+  return <div className="grouped-sort-headers" role="group" aria-label="Sort grouped downloads">
+    {([["file", "File / path"], ["peer", "Peer"], ["status", "Status"],
+      ["size", "Size"], [dateColumn, dateColumn === "queued" ? "Queued" : "Updated"]] as const)
+      .map(([key, label]) => <button key={key} type="button"
+        className={`grouped-sort-heading${sort.key === key ? " current" : ""}`}
+        aria-pressed={sort.key === key} onClick={() => onSort(key)}>
+        {label}{sort.key === key &&
+          <span className="sort-arrow" aria-hidden="true">{sort.direction === "asc" ? "↑" : "↓"}</span>}
+      </button>)}
+  </div>;
 }
 
-function DownloadTable({ items, action, busy, sort, onSort }: { items: DownloadItem[];
+function DownloadTree({ items, action, busy, expandFolders, sampleAt }: { items: DownloadItem[];
+  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean; expandFolders: boolean; sampleAt: number;
+}): React.ReactElement {
+  const disclosures = useDisclosureGroup(items.map(item => `${item.id}:${item.status}`).join("|"));
+  return <><div className="disclosure-toolbar"><button className="secondary" type="button"
+    onClick={disclosures.toggle}>{disclosures.allOpen ? "Collapse all" : "Expand all"}</button></div>
+    <div className="download-tree" ref={disclosures.root}>{groupDownloads(items).map(group => {
+      const peers = new Map<string, Map<string, DownloadItem[]>>();
+      for (const item of group.files) {
+        let folders = peers.get(item.username);
+        if (!folders) { folders = new Map(); peers.set(item.username, folders); }
+        const directory = parentDirectory(item.path);
+        const files = folders.get(directory) ?? [];
+        files.push(item);
+        folders.set(directory, files);
+      }
+      return <Collapsible className="download-search" initiallyOpen key={group.batchId}>
+        <summary><strong><a href={`#/search/${group.batchId}`} onClick={event => event.stopPropagation()}>
+          {group.label}</a></strong><small>{group.files.length} file{group.files.length === 1 ? "" : "s"} · {
+            bytes(group.files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
+        {[...peers].map(([username, folders]) => {
+          const peerFiles = [...folders.values()].flat();
+          return <Collapsible className="download-peer" initiallyOpen key={username}>
+            <summary><strong>{username}</strong><small>{peerFiles.length} file{peerFiles.length === 1 ? "" : "s"} · {
+              bytes(peerFiles.reduce((sum, file) => sum + file.size, 0))}</small></summary>
+            {[...folders].map(([directory, files]) =>
+              <Collapsible className="download-folder" initiallyOpen={expandFolders} key={directory}>
+                <summary><strong className="download-directory-desktop" title={directory}>{directory || "Shared files"}</strong>
+                  <strong className="download-directory-mobile" title={directory}>{basename(directory) || "Shared files"}</strong>
+                  <small>{files.length} file{files.length === 1 ? "" : "s"} · {
+                    bytes(files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
+                <small className="download-directory-path">{directory}</small>
+                {files.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy}
+                  showQueryLink={group.multipleQueries} sampleAt={sampleAt} />)}
+              </Collapsible>)}
+          </Collapsible>;
+        })}
+      </Collapsible>;
+    })}</div></>;
+}
+
+function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort }: { items: DownloadItem[];
   action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
-  sort: SortState<DownloadSortKey>; onSort: (key: DownloadSortKey) => void;
+  sort: SortState<DownloadSortKey>; dateColumn: "queued" | "updated"; sampleAt: number;
+  onSort: (key: DownloadSortKey) => void;
 }): React.ReactElement {
   return <div className="table-scroll"><table className="data-table download-table"><thead><tr>
     <SortHeading label="File / path" column="file" sort={sort} onSort={onSort} />
     <SortHeading label="Peer" column="peer" sort={sort} onSort={onSort} />
     <SortHeading label="Status" column="status" sort={sort} onSort={onSort} />
     <SortHeading label="Size" column="size" sort={sort} onSort={onSort} />
-    <SortHeading label="Updated" column="updated" sort={sort} onSort={onSort} />
+    <SortHeading label={dateColumn === "queued" ? "Queued" : "Updated"} column={dateColumn} sort={sort} onSort={onSort} />
     <th scope="col">Actions</th>
-  </tr></thead><tbody>{items.map(item => <tr key={item.id}>
-    <td data-label="File / path"><strong title={item.path}>{basename(item.path)}</strong>
-      <small title={item.path}>{parentDirectory(item.path)}</small>
-      <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>Search #{item.batch_number}</a></small>
-      <TransferFailure item={item} /></td>
-    <td data-label="Peer">{item.username}</td>
-    <td data-label="Status"><TransferProgress item={item} /></td>
-    <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
-    <td data-label="Updated"><time dateTime={item.updated_at}>{time(item.updated_at)}</time></td>
-    <td data-label="Actions" className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></td>
-  </tr>)}</tbody></table></div>;
+  </tr></thead>{groupDownloads(items).map(group => <tbody key={group.batchId}>
+    <DownloadGroupHeading group={group} columns={6} />
+    {group.files.map(item => <tr key={item.id}>
+      <td data-label="File / path"><strong title={item.path}>{basename(item.path)}</strong>
+        <small title={item.path}>{parentDirectory(item.path)}</small>
+        {group.multipleQueries && <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>View query</a></small>}
+        <TransferFailure item={item} /></td>
+      <td data-label="Peer">{item.username}</td>
+      <td data-label="Status"><TransferProgress item={item} sampleAt={sampleAt} /></td>
+      <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
+      <td data-label={dateColumn === "queued" ? "Queued" : "Updated"}>
+        <time dateTime={dateColumn === "queued" ? item.created_at : item.updated_at}>
+          {time(dateColumn === "queued" ? item.created_at : item.updated_at)}</time></td>
+      <td data-label="Actions" className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></td>
+    </tr>)}
+  </tbody>)}</table></div>;
 }
 
-function TransferProgress({ item }: { item: DownloadItem }): React.ReactElement {
-  const progress = item.status === "completed" ? 100 : Math.max(0, Math.min(100, item.progress));
-  const label = item.status === "active" ? `${Math.round(progress)}%` :
+function TransferProgress({ item, sampleAt }: { item: DownloadItem; sampleAt: number }): React.ReactElement {
+  const last = useRef<{ id: string; status: string; sample: ProgressSample } | null>(null);
+  const [prediction, setPrediction] = useState<{ sampleAt: number; percent: number } | null>(null);
+  useEffect(() => {
+    const previous = last.current;
+    const rate = item.status === "active" && previous?.id === item.id && previous.status === "active" ?
+      observedRate(previous.sample, item.transferred, sampleAt) : 0;
+    const sample = { transferred: item.transferred, sampledAt: sampleAt, rate };
+    last.current = { id: item.id, status: item.status, sample };
+    setPrediction(null);
+    if (item.status !== "active" || !item.size || !rate || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const timer = setInterval(() => setPrediction({
+      sampleAt, percent: predictedProgress(sample, item.size, performance.now())
+    }), 200);
+    return () => clearInterval(timer);
+  }, [item.id, item.status, item.transferred, item.size, sampleAt]);
+  const confirmed = item.status === "completed" ? 100 :
+    Math.max(0, Math.min(item.status === "active" ? 99.5 : 100,
+      item.size > 0 ? item.transferred * 100 / item.size : item.progress));
+  const estimated = item.status === "active" && prediction?.sampleAt === sampleAt &&
+    prediction.percent > confirmed + 0.1;
+  const progress = estimated ? prediction.percent : confirmed;
+  const label = item.status === "active" ? `${estimated ? "≈" : ""}${Math.floor(progress)}%` :
     item.status === "completed" ? "Completed" : item.status.replace("_", " ");
   return <div className={`download-bar ${item.status}`} role="progressbar" aria-valuemin={0} aria-valuemax={100}
-    aria-valuenow={progress} aria-label={`${basename(item.path)}: ${label}`}>
+    aria-valuenow={Math.floor(confirmed)} aria-label={`${basename(item.path)}: ${
+      item.status === "active" ? `${Math.floor(confirmed)}% confirmed${estimated ? `, approximately ${Math.floor(progress)}% estimated` : ""}` : label}`}>
     <span className="download-bar-fill" style={{ width: `${progress}%` }} />
     <span className="download-bar-label">{label}</span>
   </div>;
@@ -1081,14 +1157,15 @@ function TransferFailure({ item }: { item: DownloadItem }): React.ReactElement |
   return reason ? <small className="warn">{reason}</small> : null;
 }
 
-function DownloadRow({ item, action, busy }: { item: DownloadItem;
-  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
+function DownloadRow({ item, action, busy, showQueryLink, sampleAt }: { item: DownloadItem;
+  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean; showQueryLink: boolean; sampleAt: number;
+}): React.ReactElement {
   return <div className="download-row">
     <div className="download-file"><strong title={item.path}>{basename(item.path)}</strong>
-      <small title={item.query_text}><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>
-        Search #{item.batch_number}</a></small>
+      {showQueryLink && <small title={item.query_text}><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>
+        View query</a></small>}
       <TransferFailure item={item} /></div>
-    <TransferProgress item={item} />
+    <TransferProgress item={item} sampleAt={sampleAt} />
     <span className="download-size">{bytes(item.transferred)} / {bytes(item.size)}</span>
     <span className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></span>
   </div>;

@@ -125,6 +125,8 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
   padding: .35rem .3rem; cursor: pointer; overflow-wrap: anywhere; }
 .download-tree summary strong { min-width: 0; flex: 1 1 auto; }
 .download-tree summary small { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+.download-search > summary { font-weight: 700; }
+.download-peer { margin-left: .7rem; border-top: 1px solid var(--line); }
 .download-folder { margin-left: .7rem; border-top: 1px solid #303133; }
 .download-folder > summary { color: var(--muted); }
 .download-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 30%) 165px 68px;
@@ -135,6 +137,7 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .download-bar { position: relative; display: grid; place-items: center; width: 100%; height: 27px;
   overflow: hidden; border: 1px solid #505153; border-radius: 4px; background: #292a2c; }
 .download-bar-fill { position: absolute; inset: 0 auto 0 0; background: #557083; }
+.download-bar.active .download-bar-fill { transition: width 220ms linear; }
 .download-bar.completed .download-bar-fill { background: #546e5b; }
 .download-bar-label { position: relative; z-index: 1; color: #fff; font-weight: 700; font-size: .86rem; text-transform: capitalize; }
 .download-size { white-space: nowrap; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -161,6 +164,11 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .download-table { min-width: 780px; }
 .download-table td:first-child { min-width: 190px; max-width: 360px; }
 .download-table .download-bar { min-width: 110px; }
+.data-table .download-group-heading th { padding: .6rem .5rem; border-top: 1px solid var(--line);
+  background: #253138; white-space: normal; }
+.download-group-heading th { font-weight: 700; }
+.download-group-heading th small { float: right; margin-left: .5rem; font-weight: 400;
+  font-variant-numeric: tabular-nums; }
 .batch-progress { display: block; width: min(100%, 240px); height: 4px; margin-top: .35rem; border-radius: 4px; background: #353638; }
 .batch-progress span { display: block; height: 100%; border-radius: inherit; background: #bcbcbc; }
 .batch-tally { flex: none; text-align: right; }
@@ -422,12 +430,16 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   :root .data-table thead .sort-heading { display: inline-flex; align-items: center;
     min-height: 44px; padding: 0 .1rem; font-size: .85rem; }
   .data-table tbody { display: grid; gap: .65rem; }
+  .data-table tbody + tbody { margin-top: .65rem; }
   .data-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: .35rem .75rem; padding: .75rem; border: 1px solid var(--line); border-radius: 10px; }
   .data-table td { display: block; min-width: 0; padding: 0; border: 0; }
   .data-table td:first-child, .data-table td[data-label="File"], .data-table td[data-label="Event"] { grid-column: 1 / -1; }
   .download-table td:first-child { max-width: none; }
   .download-table .download-bar { min-width: 0; }
+  .data-table tr.download-group-heading { padding: .25rem .6rem; background: #253138; }
+  .data-table .download-group-heading th { grid-column: 1 / -1; padding: .25rem 0; border: 0; }
+  .download-group-heading th small { float: none; display: block; margin: .2rem 0 0; }
   .data-table td::before { display: block; margin-bottom: .12rem; color: var(--muted);
     content: attr(data-label); font-size: .76rem; font-weight: 600; }
   .data-table td time { white-space: normal; }
@@ -534,6 +546,7 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
     border: 1px solid var(--line); border-radius: 12px; background: #22292e; }
   .download-tree summary { align-items: center; min-height: 48px; gap: .35rem; font-size: .94rem; }
   .download-tree summary small { max-width: 42%; font-size: .78rem; text-align: right; }
+  .download-peer { margin-left: .35rem; }
   .download-folder { margin-left: .35rem; }
   .download-directory-desktop { display: none; }
   .download-directory-mobile { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2;
@@ -561,4 +574,5 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
 }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+  .download-bar.active .download-bar-fill { transition: none; }
 }

@@ -773,6 +773,48 @@ describe("authenticated mixed-batch workflow", () => {
     expect((await request(app).get("/api/downloads?sort=arbitrary").set(auth)).status).toBe(400);
   });
 
+  it("shows active folder files in enqueue order before pagination, while finished files stay newest first", async () => {
+    const { app, store, worker, port } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[1]!.original, defaultType: "album_folder", mode: "review", entries: [entries[1]]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const preview = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: preview.body.id })).status).toBe(202);
+    const queued = store.all<{ id: string; path: string }>("SELECT id,path FROM transfers ORDER BY rowid");
+    expect(queued).toHaveLength(4);
+    await worker.runOnce();
+    expect(vi.mocked(port.enqueue).mock.calls.map(([, file]) => file.path)).toEqual(queued.map(file => file.path));
+    for (const [index, transfer] of queued.entries()) {
+      store.run("UPDATE transfers SET created_at=?,updated_at=?,status=? WHERE id=?",
+        "2026-10-13T00:00:00.000Z", new Date(Date.UTC(2026, 9, 13, 0, 0, index)).toISOString(),
+        "active", transfer.id);
+    }
+    const getDownloads = async (query = "") => {
+      const response = await request(app).get(`/api/downloads?activeLimit=2&finishedLimit=2${query}`).set(auth);
+      expect(response.status).toBe(200);
+      return response.body;
+    };
+    let downloads = await getDownloads();
+    expect(downloads.active_total).toBe(4);
+    expect(downloads.active.map((file: { path: string }) => file.path))
+      .toEqual(queued.slice(0, 2).map(file => file.path));
+    downloads = await getDownloads("&activeSort=queuedDesc");
+    expect(downloads.active.map((file: { path: string }) => file.path))
+      .toEqual(queued.slice(2).reverse().map(file => file.path));
+    store.run("UPDATE transfers SET status='completed' WHERE id IN (?,?)", queued[2]!.id, queued[3]!.id);
+    downloads = await getDownloads();
+    expect(downloads.active.map((file: { path: string }) => file.path))
+      .toEqual(queued.slice(0, 2).map(file => file.path));
+    expect(downloads.finished.map((file: { path: string }) => file.path))
+      .toEqual(queued.slice(2).reverse().map(file => file.path));
+    expect((await request(app).get("/api/downloads?activeSort=arbitrary").set(auth)).status).toBe(400);
+  });
+
   it("restores a hidden failed download to the list when it is explicitly retried", async () => {
     const { app, worker, transfers } = setup();
     const auth = await login(app);

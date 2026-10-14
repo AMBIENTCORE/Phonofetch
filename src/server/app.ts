@@ -54,13 +54,15 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
       activity: store.activity({ limit: 40, hideFileDetails: true }) });
   });
   app.get("/api/downloads", (req, res) => {
-    const { activeLimit, finishedLimit, sort } = z.object({
+    const sorts = z.enum(["newest", "oldest", "largest", "smallest", "pathAsc", "pathDesc",
+      "peerAsc", "peerDesc", "statusAsc", "statusDesc", "queuedAsc", "queuedDesc"]);
+    const { activeLimit, finishedLimit, sort, activeSort, finishedSort } = z.object({
       activeLimit: z.coerce.number().int().min(1).max(25000).default(50),
       finishedLimit: z.coerce.number().int().min(1).max(25000).default(50),
-      sort: z.enum(["newest", "oldest", "largest", "smallest", "pathAsc", "pathDesc",
-        "peerAsc", "peerDesc", "statusAsc", "statusDesc"]).default("newest")
+      sort: sorts.optional(), activeSort: sorts.optional(), finishedSort: sorts.optional()
     }).parse(req.query);
-    res.json(store.downloads(activeLimit, finishedLimit, sort));
+    res.json(store.downloads(activeLimit, finishedLimit,
+      activeSort ?? sort ?? "queuedAsc", finishedSort ?? sort ?? "newest"));
   });
   app.post("/api/downloads/clear", (_, res) => {
     res.json({ cleared: store.clearFinishedDownloads() });
