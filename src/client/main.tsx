@@ -1078,11 +1078,26 @@ function DownloadTree({ items, action, busy, expandFolders, sampleAt }: { items:
     })}</div></>;
 }
 
+function DownloadTableToggle({ label, open, onToggle }: {
+  label: string; open: boolean; onToggle: () => void;
+}): React.ReactElement {
+  return <button type="button" className="download-group-toggle" aria-expanded={open} onClick={onToggle}>
+    <span className="download-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>{label}
+  </button>;
+}
+
 function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort }: { items: DownloadItem[];
   action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
   sort: SortState<DownloadSortKey>; dateColumn: "queued" | "updated"; sampleAt: number;
   onSort: (key: DownloadSortKey) => void;
 }): React.ReactElement {
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleGroup = (key: string) => setCollapsed(current => {
+    const next = new Set(current);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
   return <div className="table-scroll"><table className="data-table download-table"><thead><tr>
     <SortHeading label="File / path" column="file" sort={sort} onSort={onSort} />
     <SortHeading label="Peer" column="peer" sort={sort} onSort={onSort} />
@@ -1090,29 +1105,52 @@ function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort
     <SortHeading label="Size" column="size" sort={sort} onSort={onSort} />
     <SortHeading label={dateColumn === "queued" ? "Queued" : "Updated"} column={dateColumn} sort={sort} onSort={onSort} />
     <th scope="col">Actions</th>
-  </tr></thead>{groupDownloads(items).map(group => <tbody key={group.batchId}>
-    <DownloadGroupHeading group={group} columns={6} />
-    {groupDownloadPeers(group.files).map(peer => <React.Fragment key={peer.username}>
-      <tr className="download-peer-heading"><th scope="row" colSpan={6}>{peer.username}</th></tr>
-      {peer.folders.map(folder => <React.Fragment key={folder.directory}>
-        <tr className="download-folder-heading"><th scope="row" colSpan={6} title={folder.directory}>
-          {folder.directory || "Shared files"}</th></tr>
-        {folder.files.map(item => <tr key={item.id} aria-label={`${peer.username}, ${
-          folder.directory || "Shared files"}, ${basename(item.path)}`}>
-          <td data-label="File / path" className="download-file-cell"><strong title={item.path}>{basename(item.path)}</strong>
-            {group.multipleQueries && <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>View query</a></small>}
-            <TransferFailure item={item} /></td>
-          <td data-label="Peer" className="download-peer-cell" aria-label={peer.username} />
-          <td data-label="Status"><TransferProgress item={item} sampleAt={sampleAt} /></td>
-          <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
-          <td data-label={dateColumn === "queued" ? "Queued" : "Updated"}>
-            <time dateTime={dateColumn === "queued" ? item.created_at : item.updated_at}>
-              {time(dateColumn === "queued" ? item.created_at : item.updated_at)}</time></td>
-          <td data-label="Actions" className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></td>
-        </tr>)}
-      </React.Fragment>)}
-    </React.Fragment>)}
-  </tbody>)}</table></div>;
+  </tr></thead>{groupDownloads(items).map(group => {
+    const searchKey = JSON.stringify([group.batchId]);
+    const searchOpen = !collapsed.has(searchKey);
+    return <tbody key={group.batchId}>
+      <tr className="download-group-heading"><th scope="rowgroup" colSpan={6}>
+        <div className="download-group-line">
+          <DownloadTableToggle label={group.label} open={searchOpen} onToggle={() => toggleGroup(searchKey)} />
+          <span className="download-group-meta"><a href={`#/search/${group.batchId}`}>View search</a>
+            <small>{group.files.length} file{group.files.length === 1 ? "" : "s"} · {
+              bytes(group.files.reduce((sum, file) => sum + file.size, 0))}</small></span>
+        </div>
+      </th></tr>
+      {searchOpen && groupDownloadPeers(group.files).map(peer => {
+        const peerKey = JSON.stringify([group.batchId, peer.username]);
+        const peerOpen = !collapsed.has(peerKey);
+        return <React.Fragment key={peer.username}>
+          <tr className="download-peer-heading"><th scope="row" colSpan={6}>
+            <DownloadTableToggle label={peer.username} open={peerOpen} onToggle={() => toggleGroup(peerKey)} />
+          </th></tr>
+          {peerOpen && peer.folders.map(folder => {
+            const folderGroupKey = JSON.stringify([group.batchId, peer.username, folder.directory]);
+            const folderOpen = !collapsed.has(folderGroupKey);
+            return <React.Fragment key={folder.directory}>
+              <tr className="download-folder-heading"><th scope="row" colSpan={6} title={folder.directory}>
+                <DownloadTableToggle label={folder.directory || "Shared files"} open={folderOpen}
+                  onToggle={() => toggleGroup(folderGroupKey)} />
+              </th></tr>
+              {folderOpen && folder.files.map(item => <tr key={item.id} aria-label={`${peer.username}, ${
+                folder.directory || "Shared files"}, ${basename(item.path)}`}>
+                <td data-label="File / path" className="download-file-cell"><strong title={item.path}>{basename(item.path)}</strong>
+                  {group.multipleQueries && <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>View query</a></small>}
+                  <TransferFailure item={item} /></td>
+                <td data-label="Peer" className="download-peer-cell" aria-label={peer.username} />
+                <td data-label="Status"><TransferProgress item={item} sampleAt={sampleAt} /></td>
+                <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
+                <td data-label={dateColumn === "queued" ? "Queued" : "Updated"}>
+                  <time dateTime={dateColumn === "queued" ? item.created_at : item.updated_at}>
+                    {time(dateColumn === "queued" ? item.created_at : item.updated_at)}</time></td>
+                <td data-label="Actions" className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></td>
+              </tr>)}
+            </React.Fragment>;
+          })}
+        </React.Fragment>;
+      })}
+    </tbody>;
+  })}</table></div>;
 }
 
 function TransferProgress({ item, sampleAt }: { item: DownloadItem; sampleAt: number }): React.ReactElement {
