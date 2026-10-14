@@ -11,7 +11,8 @@ export function batchName(number: number, search: string, count: number): string
   return `Search #${number}${search ? ` · ${search}` : ""}${count > 1 ? ` (+${count - 1} more)` : ""}`;
 }
 
-export type DownloadSort = "newest" | "oldest" | "largest" | "smallest";
+export type DownloadSort = "newest" | "oldest" | "largest" | "smallest" |
+  "pathAsc" | "pathDesc" | "peerAsc" | "peerDesc" | "statusAsc" | "statusDesc";
 
 export class Store {
   readonly db: DatabaseSync;
@@ -188,11 +189,12 @@ export class Store {
 
   activity(filters: { severity?: string; category?: string; batchId?: string; requestId?: string;
     search?: string; cursor?: number; limit?: number; hideFileDetails?: boolean;
-    order?: "asc" | "desc"; sort?: "date" | "severity" | "category" } = {}): Activity[] {
+    order?: "asc" | "desc"; sort?: "date" | "severity" | "category" | "message" } = {}): Activity[] {
     const where: string[] = [];
     const args: SqlValue[] = [];
     const order = filters.order === "asc" ? "ASC" : "DESC";
-    const sortColumn = filters.sort === "severity" || filters.sort === "category" ? filters.sort : null;
+    const sortColumn = filters.sort === "severity" || filters.sort === "category" ||
+      filters.sort === "message" ? filters.sort : null;
     for (const [column, value] of [["severity", filters.severity],
       ["batch_id", filters.batchId], ["request_id", filters.requestId]] as const) {
       if (value) { where.push(`${column}=?`); args.push(value); }
@@ -205,12 +207,12 @@ export class Store {
       if (sortColumn) {
         const cursor = this.get<{ value: string }>(`SELECT ${sortColumn} AS value FROM activity WHERE id=?`, filters.cursor);
         if (!cursor) throw new RangeError("Activity cursor not found");
-        where.push(`(${sortColumn} COLLATE NOCASE > ? COLLATE NOCASE OR
+        where.push(`(${sortColumn} COLLATE NOCASE ${order === "ASC" ? ">" : "<"} ? COLLATE NOCASE OR
           (${sortColumn} COLLATE NOCASE = ? COLLATE NOCASE AND id<?))`);
         args.push(cursor.value, cursor.value, filters.cursor);
       } else { where.push(`id${order === "ASC" ? ">" : "<"}?`); args.push(filters.cursor); }
     }
-    const sorting = sortColumn ? `${sortColumn} COLLATE NOCASE ASC,id DESC` : `id ${order}`;
+    const sorting = sortColumn ? `${sortColumn} COLLATE NOCASE ${order},id DESC` : `id ${order}`;
     return this.all<Activity>(`SELECT * FROM activity ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY ${sorting} LIMIT ?`, ...args, Math.min(100, Math.max(1, filters.limit ?? 30)));
   }
@@ -238,7 +240,12 @@ export class Store {
     const order = {
       newest: "t.updated_at DESC,t.id DESC", oldest: "t.updated_at ASC,t.id ASC",
       largest: "t.size DESC,t.updated_at DESC,t.id DESC",
-      smallest: "t.size ASC,t.updated_at DESC,t.id DESC"
+      smallest: "t.size ASC,t.updated_at DESC,t.id DESC",
+      pathAsc: "t.path COLLATE NOCASE ASC,t.id DESC", pathDesc: "t.path COLLATE NOCASE DESC,t.id DESC",
+      peerAsc: "t.username COLLATE NOCASE ASC,t.updated_at DESC,t.id DESC",
+      peerDesc: "t.username COLLATE NOCASE DESC,t.updated_at DESC,t.id DESC",
+      statusAsc: "t.status COLLATE NOCASE ASC,t.updated_at DESC,t.id DESC",
+      statusDesc: "t.status COLLATE NOCASE DESC,t.updated_at DESC,t.id DESC"
     }[sort];
     const activeWhere = "t.hidden_from_downloads=0 AND t.status IN ('ready','queueing','queued','active','uncertain')";
     const finishedWhere = "t.hidden_from_downloads=0 AND t.status IN ('completed','failed','cancelled')";

@@ -57,7 +57,8 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
     const { activeLimit, finishedLimit, sort } = z.object({
       activeLimit: z.coerce.number().int().min(1).max(25000).default(50),
       finishedLimit: z.coerce.number().int().min(1).max(25000).default(50),
-      sort: z.enum(["newest", "oldest", "largest", "smallest"]).default("newest")
+      sort: z.enum(["newest", "oldest", "largest", "smallest", "pathAsc", "pathDesc",
+        "peerAsc", "peerDesc", "statusAsc", "statusDesc"]).default("newest")
     }).parse(req.query);
     res.json(store.downloads(activeLimit, finishedLimit, sort));
   });
@@ -227,7 +228,7 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
       cursor: z.coerce.number().int().positive().optional(),
       limit: z.coerce.number().int().min(1).max(100).optional(),
       order: z.enum(["asc", "desc"]).optional(),
-      sort: z.enum(["date", "severity", "category"]).optional()
+      sort: z.enum(["date", "severity", "category", "message"]).optional()
     }).parse(req.query);
     if (filters.cursor && filters.sort && filters.sort !== "date" &&
       !store.get("SELECT id FROM activity WHERE id=?", filters.cursor))

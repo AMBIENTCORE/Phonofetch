@@ -7,6 +7,7 @@ import { audioDetails, fileFormat } from "./audio-details";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import { searchDraftQuery } from "./search-navigation";
+import { sortRows, toggleSort, type SortState } from "./table-sort";
 import type { DownloadSort } from "../server/db";
 import { canAppendManualSearch, canInspectFolder, canQueueSearchHits, remoteFileKey } from "../shared/search-selection";
 import "./compact.css";
@@ -176,6 +177,27 @@ function DownloadMetrics({ stats }: { stats?: DownloadStats }): React.ReactEleme
     <div className="metric" key={metric.label}><strong>{metric.value}</strong><span>{metric.label}</span></div>)}</div>;
 }
 
+type ActivitySortKey = "date" | "severity" | "category" | "message";
+type DownloadSortKey = "file" | "peer" | "status" | "size" | "updated";
+const downloadSortValues: Record<DownloadSortKey, Record<"asc" | "desc", DownloadSort>> = {
+  file: { asc: "pathAsc", desc: "pathDesc" },
+  peer: { asc: "peerAsc", desc: "peerDesc" },
+  status: { asc: "statusAsc", desc: "statusDesc" },
+  size: { asc: "smallest", desc: "largest" },
+  updated: { asc: "oldest", desc: "newest" }
+};
+
+function SortHeading<Key extends string>({ label, column, sort, onSort }: {
+  label: string; column: Key; sort: SortState<Key>; onSort: (column: Key) => void;
+}): React.ReactElement {
+  const current = sort.key === column;
+  return <th scope="col" aria-sort={current ? sort.direction === "asc" ? "ascending" : "descending" : "none"}>
+    <button className="sort-heading" type="button" onClick={() => onSort(column)}>
+      {label}<span aria-hidden="true">{current ? sort.direction === "asc" ? " ↑" : " ↓" : " ↕"}</span>
+    </button>
+  </th>;
+}
+
 function Dashboard({ reload, action, busy }: {
   reload: number; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
 }): React.ReactElement {
@@ -190,14 +212,26 @@ function Dashboard({ reload, action, busy }: {
   const [searchLimit, setSearchLimit] = useState(8);
   const [downloadLimit, setDownloadLimit] = useState(8);
   const [activityLimit, setActivityLimit] = useState(8);
+  const [searchSort, setSearchSort] = useState<SortState<"search" | "queries" | "created">>(
+    { key: "created", direction: "desc" });
+  const [downloadSort, setDownloadSort] = useState<SortState<"file" | "peer" | "status" | "size" | "updated">>(
+    { key: "updated", direction: "desc" });
+  const [activitySort, setActivitySort] = useState<SortState<ActivitySortKey>>(
+    { key: "date", direction: "desc" });
   useEffect(() => { api<typeof data>("/dashboard").then(setData).catch(err => setError(String(err))); }, [reload]);
-  const recentDownloads = [...(data?.downloads.active ?? []), ...(data?.downloads.finished ?? [])]
-    .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id))
-    .filter(item => matchesText(downloadFilter, item.path, item.username, item.status, item.query_text));
-  const recentSearches = (data?.batches ?? []).filter(batch =>
-    matchesText(searchFilter, batch.name, batch.original_input));
-  const recentActivity = (data?.activity ?? []).filter(event =>
-    matchesText(activityFilter, event.message, event.category, event.severity, event.event_type));
+  const recentDownloads = sortRows(
+    [...(data?.downloads.active ?? []), ...(data?.downloads.finished ?? [])]
+      .filter(item => matchesText(downloadFilter, item.path, item.username, item.status, item.query_text)),
+    item => ({ file: item.path, peer: item.username, status: item.status, size: item.size,
+      updated: item.updated_at })[downloadSort.key], downloadSort.direction);
+  const recentSearches = sortRows((data?.batches ?? []).filter(batch =>
+    matchesText(searchFilter, batch.name, batch.original_input)),
+  batch => ({ search: batch.name, queries: batch.total, created: batch.created_at })[searchSort.key],
+  searchSort.direction);
+  const recentActivity = sortRows((data?.activity ?? []).filter(event =>
+    matchesText(activityFilter, event.message, event.category, event.severity, event.event_type)),
+  event => ({ date: event.created_at, severity: event.severity, category: event.category,
+    message: event.message })[activitySort.key], activitySort.direction);
   return <><div className="page-title"><div><h1>Dashboard</h1><p>Downloads and recent searches.</p></div></div>
     {data?.slskd_status === "unavailable" && <p role="status" className="service-warning">slskd unavailable. Searches stay pending until it reconnects. <a href="#/activity">View Activity Log</a></p>}
     <p role="alert">{error}</p>
@@ -224,7 +258,12 @@ function Dashboard({ reload, action, busy }: {
         onChange={event => { setSearchFilter(event.target.value); setSearchLimit(8); }} placeholder="Artist, album, or query" /></label>
       <small>{recentSearches.length} in the latest {data?.batches.length ?? 0} searches</small>
       {recentSearches.length ? <div className="table-scroll"><table className="data-table"><thead><tr>
-        <th scope="col">Search</th><th scope="col">Queries</th><th scope="col">Created</th>
+        <SortHeading label="Search" column="search" sort={searchSort}
+          onSort={key => setSearchSort(current => toggleSort(current, key, "created"))} />
+        <SortHeading label="Queries" column="queries" sort={searchSort}
+          onSort={key => setSearchSort(current => toggleSort(current, key, "created"))} />
+        <SortHeading label="Created" column="created" sort={searchSort}
+          onSort={key => setSearchSort(current => toggleSort(current, key, "created"))} />
       </tr></thead><tbody>{recentSearches.slice(0, searchLimit).map(batch => <tr key={batch.id}>
         <td data-label="Search"><a href={`#/search/${batch.id}`} title={batch.name}>{batch.name}</a></td>
         <td data-label="Queries">{batch.total}</td><td data-label="Created"><time dateTime={batch.created_at}>{time(batch.created_at)}</time></td>
@@ -237,8 +276,16 @@ function Dashboard({ reload, action, busy }: {
         onChange={event => { setDownloadFilter(event.target.value); setDownloadLimit(8); }} placeholder="File, peer, or status" /></label>
       <small>{recentDownloads.length} in the latest {data ? data.downloads.active.length + data.downloads.finished.length : 0} transfers</small>
       {recentDownloads.length ? <div className="table-scroll"><table className="data-table"><thead><tr>
-        <th scope="col">File</th><th scope="col">Peer</th><th scope="col">Status</th>
-        <th scope="col">Size</th><th scope="col">Updated</th>
+        <SortHeading label="File / path" column="file" sort={downloadSort}
+          onSort={key => setDownloadSort(current => toggleSort(current, key, "updated"))} />
+        <SortHeading label="Peer" column="peer" sort={downloadSort}
+          onSort={key => setDownloadSort(current => toggleSort(current, key, "updated"))} />
+        <SortHeading label="Status" column="status" sort={downloadSort}
+          onSort={key => setDownloadSort(current => toggleSort(current, key, "updated"))} />
+        <SortHeading label="Size" column="size" sort={downloadSort}
+          onSort={key => setDownloadSort(current => toggleSort(current, key, "updated"))} />
+        <SortHeading label="Updated" column="updated" sort={downloadSort}
+          onSort={key => setDownloadSort(current => toggleSort(current, key, "updated"))} />
       </tr></thead><tbody>{recentDownloads.slice(0, downloadLimit).map(item => <tr key={item.id}>
         <td data-label="File"><strong title={item.path}>{basename(item.path)}</strong><small><a
           href={`#/search/${item.batch_id}?request=${item.request_id}`}>Search #{item.batch_number}</a></small></td>
@@ -254,7 +301,8 @@ function Dashboard({ reload, action, busy }: {
         onChange={event => { setActivityFilter(event.target.value); setActivityLimit(8); }}
         placeholder="Message, severity, or category" /></label>
       <small>{recentActivity.length} in the latest {data?.activity.length ?? 0} events</small>
-      <ActivityTable events={recentActivity.slice(0, activityLimit)}
+      <ActivityTable events={recentActivity.slice(0, activityLimit)} sort={activitySort}
+        onSort={key => setActivitySort(current => toggleSort(current, key, "date"))}
         emptyMessage={data ? "No matching activity." : "Loading activity…"} />
       {recentActivity.length > activityLimit && <button className="secondary table-more"
         onClick={() => setActivityLimit(limit => limit + 8)}>Show more activity</button>}
@@ -269,7 +317,8 @@ function DownloadsPage({ reload, action, busy }: {
   const [error, setError] = useState("");
   const [activeLimit, setActiveLimit] = useState(50);
   const [finishedLimit, setFinishedLimit] = useState(50);
-  const [sort, setSort] = useState<DownloadSort>("newest");
+  const [sort, setSort] = useState<SortState<DownloadSortKey>>({ key: "updated", direction: "desc" });
+  const [view, setView] = useState<"table" | "grouped">("table");
   const [filterText, setFilterText] = useState("");
   const [mobileView, setMobileView] = useState<"active" | "finished" | null>(null);
   const selectedView = mobileView ?? (data?.active_total === 0 && data.finished_total > 0 ? "finished" : "active");
@@ -287,11 +336,11 @@ function DownloadsPage({ reload, action, busy }: {
   };
   useEffect(() => {
     let mounted = true;
-    api<DownloadsData>(`/downloads?activeLimit=${activeLimit}&finishedLimit=${finishedLimit}&sort=${sort}`)
+    api<DownloadsData>(`/downloads?activeLimit=${activeLimit}&finishedLimit=${finishedLimit}&sort=${downloadSortValues[sort.key][sort.direction]}`)
       .then(result => { if (mounted) { setData(result); setError(""); } })
       .catch(err => { if (mounted) setError(String(err)); });
     return () => { mounted = false; };
-  }, [reload, activeLimit, finishedLimit, sort]);
+  }, [reload, activeLimit, finishedLimit, sort.key, sort.direction]);
   return <><div className="page-title"><div><h1>Downloads</h1><p>slskd transfers; clearing this view never deletes downloaded files.</p></div></div>
     <p role="alert">{error}</p>
     <DownloadMetrics stats={data?.stats} />
@@ -300,15 +349,26 @@ function DownloadsPage({ reload, action, busy }: {
       <button className="secondary" disabled={busy} onClick={clearStats}>Clear statistics</button>
     </div>
     <div className="download-view-controls">
-      <label>Sort files<select value={sort} onChange={event => setSort(event.target.value as DownloadSort)}>
-        <option value="newest">Recently updated</option><option value="oldest">Oldest updated</option>
-        <option value="largest">Largest first</option><option value="smallest">Smallest first</option>
-      </select></label>
       <label>Filter loaded downloads<input type="search" value={filterText}
         onChange={event => setFilterText(event.target.value)} placeholder="File, peer, folder, status, or date" /></label>
-      <small>Files are sorted before loading; peer/folder groups follow their first file.
+      <div className="download-view-tabs" role="group" aria-label="Download view">
+        <button type="button" className={view === "table" ? "current" : "secondary"}
+          aria-pressed={view === "table"} onClick={() => setView("table")}>Table</button>
+        <button type="button" className={view === "grouped" ? "current" : "secondary"}
+          aria-pressed={view === "grouped"} onClick={() => setView("grouped")}>Grouped</button>
+      </div>
+      <small>Column headings sort files before loading more; grouped peers follow their first file.
         {filterText && " Filtering loaded entries; load more to include additional files."}</small>
     </div>
+    {view === "grouped" && <div className="grouped-sort-headers" role="group" aria-label="Sort grouped downloads">
+      {([["file", "File / path"], ["peer", "Peer"], ["status", "Status"],
+        ["size", "Size"], ["updated", "Updated"]] as const).map(([key, label]) =>
+        <button key={key} type="button" className={sort.key === key ? "current" : "secondary"}
+          aria-pressed={sort.key === key}
+          onClick={() => setSort(current => toggleSort(current, key, "updated"))}>
+          {label} {sort.key === key ? sort.direction === "asc" ? "↑" : "↓" : "↕"}
+        </button>)}
+    </div>}
     <div className="mobile-download-tabs" role="group" aria-label="Download status">
       <button type="button" className={selectedView === "active" ? "current" : ""} aria-pressed={selectedView === "active"}
         onClick={() => setMobileView("active")}>Active <span>{data?.active_total ?? 0}</span></button>
@@ -321,7 +381,9 @@ function DownloadsPage({ reload, action, busy }: {
         {data?.stats.uncertain_count ? ` · ${data.stats.uncertain_count} uncertain` : ""}</small></div>
       {!visibleActive.length ? <p className="empty">{data ?
         filterText ? "No matching loaded ongoing downloads." : "No ongoing downloads." : "Loading downloads…"}</p> :
-        <DownloadTree items={visibleActive} action={action} busy={busy} expandFolders />}
+        view === "table" ? <DownloadTable items={visibleActive} action={action} busy={busy}
+          sort={sort} onSort={key => setSort(current => toggleSort(current, key, "updated"))} /> :
+          <DownloadTree items={visibleActive} action={action} busy={busy} expandFolders />}
       {data && data.active_total > data.active.length && <button className="secondary" onClick={() => setActiveLimit(limit => limit + 50)}>Load more ongoing</button>}
     </section>
     <section className={`panel download-section${selectedView === "finished" ? " mobile-selected" : ""}`}>
@@ -329,7 +391,10 @@ function DownloadsPage({ reload, action, busy }: {
       <small>{filterText && `${visibleFinished.length} shown of `}{data?.finished_total ?? 0} in list</small></div>
       {!visibleFinished.length ? <p className="empty">{data ?
         filterText ? "No matching loaded finished downloads." : "No finished downloads in the list." : "Loading downloads…"}</p> :
-        <DownloadTree items={visibleFinished} action={action} busy={busy} expandFolders={mobile && visibleFinished.length <= 10} />}
+        view === "table" ? <DownloadTable items={visibleFinished} action={action} busy={busy}
+          sort={sort} onSort={key => setSort(current => toggleSort(current, key, "updated"))} /> :
+          <DownloadTree items={visibleFinished} action={action} busy={busy}
+            expandFolders={mobile && visibleFinished.length <= 10} />}
       {data && data.finished_total > data.finished.length && <button className="secondary" onClick={() => setFinishedLimit(limit => limit + 50)}>Load more finished</button>}
     </section>
     <details className="mobile-download-options"><summary>Manage downloads</summary>
@@ -723,6 +788,8 @@ function peerDetails(candidate?: Candidate): string {
 function TrackResultsTable({ candidates, canSelect, selected, onSelect }: {
   candidates: Candidate[]; canSelect: boolean; selected: ReadonlySet<string>; onSelect: (candidateId: string) => void;
 }): React.ReactElement {
+  const [sort, setSort] = useState<SortState<"file" | "size" | "type" | "match">>(
+    { key: "match", direction: "desc" });
   const peers = new Map<string, Map<string, Candidate[]>>();
   for (const candidate of [...candidates].sort(peerOrder)) {
     let directories = peers.get(candidate.username);
@@ -736,8 +803,18 @@ function TrackResultsTable({ candidates, canSelect, selected, onSelect }: {
       {[...directories].map(([directory, files]) => <Collapsible className="directory-group" initiallyOpen key={directory}>
         <summary>{directory || "Shared files"} · {files.length} · {bytes(files.reduce((sum, file) => sum + file.size, 0))}</summary>
         <div className="search-table-wrap"><table className="search-table"><thead><tr>
-          <th>File</th><th>Size</th><th>Type / bitrate</th><th>Match</th>
-        </tr></thead><tbody>{files.map(candidate => <tr key={candidate.id}>
+          <SortHeading label="File" column="file" sort={sort}
+            onSort={key => setSort(current => toggleSort(current, key, "match"))} />
+          <SortHeading label="Size" column="size" sort={sort}
+            onSort={key => setSort(current => toggleSort(current, key, "match"))} />
+          <SortHeading label="Type / bitrate" column="type" sort={sort}
+            onSort={key => setSort(current => toggleSort(current, key, "match"))} />
+          <SortHeading label="Match" column="match" sort={sort}
+            onSort={key => setSort(current => toggleSort(current, key, "match"))} />
+        </tr></thead><tbody>{sortRows(files, candidate =>
+          ({ file: basename(candidate.path), size: candidate.size,
+            type: fileFormat(candidate.metadata, candidate.path), match: candidate.score })[sort.key],
+        sort.direction).map(candidate => <tr key={candidate.id}>
           <td title={candidate.path}><label className="folder-tree-select">
             <input type="checkbox" aria-label={`Select ${basename(candidate.path)} from ${candidate.username}`}
               checked={selected.has(candidate.id)} disabled={!canSelect || !candidate.eligible}
@@ -951,21 +1028,49 @@ function DownloadTree({ items, action, busy, expandFolders }: { items: DownloadI
   })}</div></>;
 }
 
-function DownloadRow({ item, action, busy }: { item: DownloadItem;
-  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
+function DownloadTable({ items, action, busy, sort, onSort }: { items: DownloadItem[];
+  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
+  sort: SortState<DownloadSortKey>; onSort: (key: DownloadSortKey) => void;
+}): React.ReactElement {
+  return <div className="table-scroll"><table className="data-table download-table"><thead><tr>
+    <SortHeading label="File / path" column="file" sort={sort} onSort={onSort} />
+    <SortHeading label="Peer" column="peer" sort={sort} onSort={onSort} />
+    <SortHeading label="Status" column="status" sort={sort} onSort={onSort} />
+    <SortHeading label="Size" column="size" sort={sort} onSort={onSort} />
+    <SortHeading label="Updated" column="updated" sort={sort} onSort={onSort} />
+    <th scope="col">Actions</th>
+  </tr></thead><tbody>{items.map(item => <tr key={item.id}>
+    <td data-label="File / path"><strong title={item.path}>{basename(item.path)}</strong>
+      <small title={item.path}>{parentDirectory(item.path)}</small>
+      <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>Search #{item.batch_number}</a></small>
+      {item.error && <small className="warn">{item.error}</small>}</td>
+    <td data-label="Peer">{item.username}</td>
+    <td data-label="Status"><TransferProgress item={item} /></td>
+    <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
+    <td data-label="Updated"><time dateTime={item.updated_at}>{time(item.updated_at)}</time></td>
+    <td data-label="Actions" className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></td>
+  </tr>)}</tbody></table></div>;
+}
+
+function TransferProgress({ item }: { item: DownloadItem }): React.ReactElement {
   const progress = item.status === "completed" ? 100 : Math.max(0, Math.min(100, item.progress));
   const label = item.status === "active" ? `${Math.round(progress)}%` :
     item.status === "completed" ? "Completed" : item.status.replace("_", " ");
+  return <div className={`download-bar ${item.status}`} role="progressbar" aria-valuemin={0} aria-valuemax={100}
+    aria-valuenow={progress} aria-label={`${basename(item.path)}: ${label}`}>
+    <span className="download-bar-fill" style={{ width: `${progress}%` }} />
+    <span className="download-bar-label">{label}</span>
+  </div>;
+}
+
+function DownloadRow({ item, action, busy }: { item: DownloadItem;
+  action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
   return <div className="download-row">
     <div className="download-file"><strong title={item.path}>{basename(item.path)}</strong>
       <small title={item.query_text}><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>
         Search #{item.batch_number}</a></small>
       {item.error && <small className="warn">{item.error}</small>}</div>
-    <div className={`download-bar ${item.status}`} role="progressbar" aria-valuemin={0} aria-valuemax={100}
-      aria-valuenow={progress} aria-label={`${basename(item.path)}: ${label}`}>
-      <span className="download-bar-fill" style={{ width: `${progress}%` }} />
-      <span className="download-bar-label">{label}</span>
-    </div>
+    <TransferProgress item={item} />
     <span className="download-size">{bytes(item.transferred)} / {bytes(item.size)}</span>
     <span className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></span>
   </div>;
@@ -982,10 +1087,15 @@ function ActivityList({ events }: { events: Activity[] }): React.ReactElement {
         {event.batch_id && <> · <a href={`#/search/${event.batch_id}${event.request_id ? `?request=${event.request_id}` : ""}`}>{event.request_id ? "Query" : "Search"}</a></>}</small></div></div>)}</div>;
 }
 
-function ActivityTable({ events, emptyMessage }: { events: Activity[]; emptyMessage: string }): React.ReactElement {
+function ActivityTable({ events, emptyMessage, sort, onSort }: { events: Activity[]; emptyMessage: string;
+        sort: SortState<ActivitySortKey>; onSort: (column: ActivitySortKey) => void;
+}): React.ReactElement {
         if (!events.length) return <p className="empty">{emptyMessage}</p>;
         return <div className="table-scroll"><table className="data-table activity-table"><thead><tr>
-          <th scope="col">Date</th><th scope="col">Severity</th><th scope="col">Category</th><th scope="col">Event</th>
+          <SortHeading label="Date" column="date" sort={sort} onSort={onSort} />
+          <SortHeading label="Severity" column="severity" sort={sort} onSort={onSort} />
+          <SortHeading label="Category" column="category" sort={sort} onSort={onSort} />
+          <SortHeading label="Event" column="message" sort={sort} onSort={onSort} />
         </tr></thead><tbody>{events.map(event => <tr key={event.id}>
           <td data-label="Date"><time dateTime={event.created_at}>{time(event.created_at)}</time></td>
           <td data-label="Severity"><span className={`indicator ${event.severity}`} aria-hidden="true" />
@@ -1013,17 +1123,15 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
   const [filtersOpen, setFiltersOpen] = useState(() => matchMedia("(min-width: 700px)").matches);
   const [historyPaused, setHistoryPaused] = useState(false);
   const [manualReload, setManualReload] = useState(0);
-  const [sort, setSort] = useState<"newest" | "oldest" | "severity" | "category">("newest");
-  const order = sort === "oldest" ? "asc" : "desc";
-  const sortColumn = sort === "severity" || sort === "category" ? sort : "date";
-  const queryKey = JSON.stringify([severity, category, batchId, requestId, search, sort]);
+  const [sort, setSort] = useState<SortState<ActivitySortKey>>({ key: "date", direction: "desc" });
+  const queryKey = JSON.stringify([severity, category, batchId, requestId, search, sort.key, sort.direction]);
   const currentQuery = useRef(queryKey);
   currentQuery.current = queryKey;
   const activeFilters = [severity, category, batchId, requestId, search].filter(Boolean).length;
   const resetView = () => { setHistoryPaused(false); setEvents([]); setOlder(false); };
   useEffect(() => {
     if (historyPaused) return;
-    const params = new URLSearchParams({ limit: "40", order, sort: sortColumn });
+    const params = new URLSearchParams({ limit: "40", order: sort.direction, sort: sort.key });
     if (severity) params.set("severity", severity);
     if (category) params.set("category", category);
     if (batchId) params.set("batchId", batchId);
@@ -1034,7 +1142,7 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
       if (mounted) { setEvents(items); setOlder(items.length === 40); setError(""); }
     }).catch(err => { if (mounted) setError(String(err)); });
     return () => { mounted = false; };
-  }, [reload, manualReload, severity, category, batchId, requestId, search, order, sortColumn, historyPaused]);
+  }, [reload, manualReload, severity, category, batchId, requestId, search, sort.key, sort.direction, historyPaused]);
   async function loadOlder(): Promise<void> {
     if (loadingMore) return;
     const last = events.at(-1);
@@ -1042,7 +1150,8 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
     const requestedQuery = queryKey;
     setLoadingMore(true);
     try {
-      const params = new URLSearchParams({ limit: "40", cursor: String(last.id), order, sort: sortColumn });
+      const params = new URLSearchParams({ limit: "40", cursor: String(last.id),
+        order: sort.direction, sort: sort.key });
       if (severity) params.set("severity", severity);
       if (category) params.set("category", category);
       if (batchId) params.set("batchId", batchId);
@@ -1084,19 +1193,16 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
       <label>Search messages<input value={search} onChange={event => {
         resetView(); setSearch(event.target.value);
       }} /></label></div>}
-      <div className="activity-sort-controls"><label className="table-sort">Sort activity<select value={sort} onChange={event => {
-        resetView(); setSort(event.target.value as typeof sort);
-      }}>
-        <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
-        <option value="severity">Severity (A–Z)</option><option value="category">Category (A–Z)</option>
-      </select></label><button className="secondary" onClick={() => {
+      <div className="activity-sort-controls"><button className="secondary" onClick={() => {
         resetView(); setManualReload(value => value + 1);
       }}>Refresh events</button></div>
       {historyPaused && <small>Live refresh is paused while viewing older events. Select Refresh events to resume.</small>}
-      <p role="alert">{error}</p><ActivityTable events={events} emptyMessage="No matching events." />
+      <p role="alert">{error}</p><ActivityTable events={events} sort={sort}
+        onSort={key => { resetView(); setSort(current => toggleSort(current, key, "date")); }}
+        emptyMessage="No matching events." />
       {older && <button className="secondary table-more" disabled={loadingMore} onClick={() => void loadOlder()}>
-        {loadingMore ? "Loading…" : sort === "oldest" ? "Load newer events" :
-          sort === "newest" ? "Load older events" : "Load more events"}</button>}</section></>;
+        {loadingMore ? "Loading…" : sort.key === "date" && sort.direction === "asc" ? "Load newer events" :
+          sort.key === "date" ? "Load older events" : "Load more events"}</button>}</section></>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

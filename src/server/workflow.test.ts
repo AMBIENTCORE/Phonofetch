@@ -749,8 +749,10 @@ describe("authenticated mixed-batch workflow", () => {
     for (const [index, transfer] of queued.entries()) {
       const size = [20, 40, 10, 30][index];
       if (size === undefined) throw new Error("Unexpected transfer count");
-      store.run("UPDATE transfers SET size=?,status='completed',updated_at=? WHERE id=?",
-        size, new Date(Date.UTC(2026, 9, 10 + index)).toISOString(), transfer.id);
+      store.run("UPDATE transfers SET size=?,status=?,username=?,updated_at=? WHERE id=?",
+        size, ["completed", "failed", "cancelled", "completed"][index]!,
+        index === 1 ? "bob" : "alice",
+        new Date(Date.UTC(2026, 9, 10 + index)).toISOString(), transfer.id);
     }
     const files = async (sort: string) => {
       const response = await request(app).get(`/api/downloads?sort=${sort}&finishedLimit=2`).set(auth);
@@ -762,6 +764,12 @@ describe("authenticated mixed-batch workflow", () => {
     expect(await files("smallest")).toEqual([10, 20]);
     expect(await files("newest")).toEqual([30, 10]);
     expect(await files("oldest")).toEqual([20, 40]);
+    expect(await files("pathAsc")).toEqual([20, 40]);
+    expect(await files("pathDesc")).toEqual([30, 10]);
+    expect(await files("peerAsc")).toEqual([30, 10]);
+    expect(await files("peerDesc")).toEqual([40, 30]);
+    expect(await files("statusAsc")).toEqual([10, 30]);
+    expect(await files("statusDesc")).toEqual([40, 30]);
     expect((await request(app).get("/api/downloads?sort=arbitrary").set(auth)).status).toBe(400);
   });
 

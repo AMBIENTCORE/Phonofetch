@@ -30,11 +30,13 @@ describe("SQLite persistence and activity", () => {
     const oldest = b.activity({ order: "asc", limit: 1 })[0]!;
     expect(b.activity({ order: "asc", cursor: oldest.id, limit: 2 }).map(event => event.id))
       .toEqual(b.activity({ order: "asc" }).slice(1, 3).map(event => event.id));
-    for (const sort of ["severity", "category"] as const) {
-      const all = b.activity({ sort }).map(event => event.id);
-      const first = b.activity({ sort, limit: 2 });
-      const rest = b.activity({ sort, cursor: first[1]!.id });
-      expect([...first, ...rest].map(event => event.id)).toEqual(all);
+    for (const sort of ["severity", "category", "message"] as const) {
+      for (const order of ["asc", "desc"] as const) {
+        const all = b.activity({ sort, order }).map(event => event.id);
+        const first = b.activity({ sort, order, limit: 2 });
+        const rest = b.activity({ sort, order, cursor: first[1]!.id });
+        expect([...first, ...rest].map(event => event.id)).toEqual(all);
+      }
     }
     b.close();
   });
