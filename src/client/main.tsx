@@ -7,6 +7,7 @@ import { audioDetails, fileFormat } from "./audio-details";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import { searchDraftQuery } from "./search-navigation";
+import { canAppendManualSearch, canInspectFolder, canQueueSearchHits, remoteFileKey } from "../shared/search-selection";
 import "./compact.css";
 
 let csrf = "";
@@ -372,6 +373,25 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   const [filterText, setFilterText] = useState("");
   const [selectedHits, setSelectedHits] = useState<Set<string>>(new Set());
   const [selectedPreviews, setSelectedPreviews] = useState<Map<string, Set<string>>>(new Map());
+  const queuedSignature = request.transfers.map(transfer => remoteFileKey(transfer)).join("|");
+  useEffect(() => {
+    const queued = new Set(request.transfers.map(remoteFileKey));
+    setSelectedHits(current => {
+      const remaining = new Set([...current].filter(id => {
+        const hit = request.candidates.find(candidate => candidate.id === id);
+        return hit && !queued.has(remoteFileKey(hit));
+      }));
+      return remaining.size === current.size ? current : remaining;
+    });
+    setSelectedPreviews(current => {
+      const remaining = new Map([...current].map(([id, paths]) => {
+        const preview = request.previews.find(item => item.id === id);
+        return [id, new Set([...paths].filter(path => !preview ||
+          !queued.has(remoteFileKey({ username: preview.username, path }))))] as const;
+      }));
+      return [...current].every(([id, paths]) => remaining.get(id)?.size === paths.size) ? current : remaining;
+    });
+  }, [request.id, queuedSignature]);
   const mobile = useMobileLayout();
   const parsedFilter = parseResultFilter(filterText);
   const matches = (file: Pick<RemoteFile, "path" | "size" | "metadata">): boolean =>
@@ -408,9 +428,11 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   const fileDisclosures = useDisclosureGroup(`${request.id}:${request.type}:files:${visibleCandidates.length}:${preset}:${filterText}`);
   const folderDisclosures = useDisclosureGroup(
     `${request.id}:${request.type}:folders:${request.candidates.length}:${request.previews.length}:${recursive}:${preset}:${filterText}`);
-  const canInspect = ["review", "no_results"].includes(request.status) && !request.jobs.length;
-  const canSelectHits = request.status === "review" && !request.transfers.length && !busy;
-  const chosenHits = request.candidates.filter(candidate => selectedHits.has(candidate.id) && candidate.eligible);
+  const canInspect = canInspectFolder(request) && (!request.jobs.length || canAppendManualSearch(request));
+  const canSelectHits = canQueueSearchHits(request) &&
+    (canAppendManualSearch(request) || !request.transfers.length) && !busy;
+  const chosenHits = request.candidates.filter(candidate =>
+    selectedHits.has(candidate.id) && searchHitSelectionReason(request, candidate) === null);
   const chooseHit = (id: string) => {
     setSelectedHits(current => {
       const next = new Set(request.type === "track" ? [] : current);
@@ -577,6 +599,7 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
 }): React.ReactElement {
   const preview = request.previews.find(item =>
     folderKey(request.id, item.username, item.directory, item.recursive) === folderId);
+  const queuedKeys = new Set(request.transfers.map(remoteFileKey));
   const visibleHits = hits.filter(matches);
   const visibleFiles = preview?.files.filter(matches) ?? [];
   const previewExpired = preview && Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
@@ -592,12 +615,14 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
       </div>
       {preview && visibleFiles.length > 0 && <Preview key={preview.id} preview={preview}
         visibleFiles={visibleFiles} filterActive={filterKey !== "all:"} busy={busy} canQueue={canInspect}
+        queuedKeys={queuedKeys}
         selected={previewSelections.get(preview.id) ?? new Set<string>()}
         onSelectionChange={paths => onPreviewSelectionChange(preview.id, paths)}
         confirmPreview={paths => {
           const count = paths?.length ?? visibleFiles.filter(file => file.eligible).length;
-          if (confirm(`Queue ${count} files from ${preview.username}\\${preview.directory}?${preview.excluded_count || count < preview.eligible_count ?
-            ` Partial folder: ${preview.excluded_count} unavailable and ${preview.eligible_count - count} unselected.` : ""}`))
+          const available = preview.files.filter(file => file.eligible && !queuedKeys.has(remoteFileKey(file))).length;
+          if (confirm(`Queue ${count} files from ${preview.username}\\${preview.directory}?${preview.excluded_count || count < available ?
+            ` Partial folder: ${preview.excluded_count} unavailable and ${available - count} unselected.` : ""}`))
             void action(() => send(`/requests/${request.id}/queue-folder`, { previewId: preview.id, selectedPaths: paths }));
         }} />}
       {shownHits.length > 0 &&
@@ -608,7 +633,7 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
             return <div className="folder-hit" key={file.id}>
               <label className="folder-tree-select folder-hit-name">
                 <input type="checkbox" aria-label={`Select ${basename(file.path)} from ${file.username}`}
-                  checked={selectedHits.has(file.id)} disabled={selectionReason !== null}
+                  checked={selectionReason === null && selectedHits.has(file.id)} disabled={selectionReason !== null}
                   onChange={() => onSelectHit(file.id)} />
                 <span><strong>{basename(file.path)}</strong>
                   {selectionReason && <small className="warn" title={selectionReason}>{selectionReason}</small>}</span>
@@ -696,9 +721,10 @@ interface FolderTreeNode {
   files: PreviewFile[];
 }
 
-function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue }: {
+function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue, queuedKeys }: {
   preview: FolderPreview; files: PreviewFile[]; selected: ReadonlySet<string>; onSelect: (path: string) => void;
   onFileMenu: (event: React.MouseEvent | React.KeyboardEvent, file: PreviewFile) => void; canQueue: boolean;
+  queuedKeys: ReadonlySet<string>;
 }): React.ReactElement {
   const root: FolderTreeNode = { name: preview.directory, directories: new Map(), files: [] };
   const prefix = `${preview.directory.replace(/\\/g, "/").replace(/\/+$/, "")}/`;
@@ -730,13 +756,16 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue }
       })}
       {node.files.map(file => {
         const details = audioDetails(file.metadata, file.path);
-        return <li className="folder-tree-file" key={file.path} tabIndex={canQueue && file.eligible ? 0 : undefined}
+        const queued = queuedKeys.has(remoteFileKey(file));
+        return <li className="folder-tree-file" key={file.path}
+        tabIndex={canQueue && file.eligible && !queued ? 0 : undefined}
         onContextMenu={event => onFileMenu(event, file)}
         onKeyDown={event => { if (event.key === "F10" && event.shiftKey) onFileMenu(event, file); }}>
-        <label className="folder-tree-select"><input type="checkbox" checked={selected.has(file.path)}
-          aria-label={`Select ${basename(file.path)}`} disabled={!canQueue || !file.eligible}
+        <label className="folder-tree-select"><input type="checkbox" checked={!queued && selected.has(file.path)}
+          aria-label={`Select ${basename(file.path)}`} disabled={!canQueue || !file.eligible || queued}
           onChange={() => onSelect(file.path)} />
-          <span><strong>{basename(file.path)}</strong>{!file.eligible && <small className="warn">{file.reason}</small>}</span>
+          <span><strong>{basename(file.path)}</strong>{queued ?
+            <small className="muted">Already queued</small> : !file.eligible && <small className="warn">{file.reason}</small>}</span>
         </label><span className="folder-file-format" title={details}>{fileFormat(file.metadata, file.path)}</span>
         <span className="folder-file-size">{bytes(file.size)}</span>
       </li>;
@@ -746,8 +775,9 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue }
   return <div className="folder-tree-scroll">{render(root)}</div>;
 }
 
-function Preview({ preview, visibleFiles, filterActive, busy, canQueue, selected, onSelectionChange, confirmPreview }: {
+function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKeys, selected, onSelectionChange, confirmPreview }: {
   preview: FolderPreview; visibleFiles: PreviewFile[]; filterActive: boolean;
+  queuedKeys: ReadonlySet<string>;
   selected: ReadonlySet<string>; onSelectionChange: (paths: Set<string>) => void;
   busy: boolean; canQueue: boolean; confirmPreview: (paths?: string[]) => void;
 }): React.ReactElement {
@@ -755,7 +785,8 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, selected
   const expired = Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
   const canDownload = canQueue && !busy && !expired;
   const eligible = visibleFiles.filter(file => file.eligible);
-  const allEligible = preview.files.filter(file => file.eligible);
+  const availableVisible = eligible.filter(file => !queuedKeys.has(remoteFileKey(file)));
+  const allEligible = preview.files.filter(file => file.eligible && !queuedKeys.has(remoteFileKey(file)));
   const excluded = visibleFiles.filter(file => !file.eligible);
   const selectedFiles = allEligible.filter(file => selected.has(file.path));
   const visiblePaths = new Set(visibleFiles.map(file => file.path));
@@ -767,7 +798,7 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, selected
     onSelectionChange(next);
   };
   const openFileMenu = (event: React.MouseEvent | React.KeyboardEvent, file: PreviewFile) => {
-    if (!file.eligible || !canDownload) return;
+    if (!file.eligible || !canDownload || queuedKeys.has(remoteFileKey(file))) return;
     event.preventDefault();
     if (!selected.has(file.path)) onSelectionChange(new Set([file.path]));
     const rect = event.currentTarget.getBoundingClientRect();
@@ -778,18 +809,22 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, selected
   return <div className="preview folder-preview">
     <div className="folder-summary"><span>{visibleFiles.length}{filterActive && ` of ${preview.files.length}`} file{visibleFiles.length === 1 ? "" : "s"}
       {preview.recursive ? " incl. subfolders" : ""}
-      {excluded.length > 0 && ` · ${eligible.length} selectable · ${excluded.length} unavailable`}
+      {excluded.length > 0 && ` · ${availableVisible.length} selectable · ${excluded.length} unavailable`}
+      {visibleFiles.some(file => queuedKeys.has(remoteFileKey(file))) &&
+        ` · ${visibleFiles.filter(file => queuedKeys.has(remoteFileKey(file))).length} already queued`}
       {hiddenSelected > 0 && ` · ${hiddenSelected} selected outside this filter`}</span>
       <strong>{bytes(visibleFiles.reduce((sum, file) => sum + file.size, 0))}
         {filterActive && ` shown · ${bytes(preview.audio_bytes)} folder`}</strong></div>
     {eligible.length ? <>
       <div className="folder-tree-columns"><span>File</span><span>Type / bitrate</span><span>Size</span></div>
       <FolderTree preview={preview} files={eligible} selected={selected} onSelect={chooseFile}
+        queuedKeys={queuedKeys}
         onFileMenu={openFileMenu} canQueue={canDownload} />
     </> : <small>No selectable files match this filter. Select All or adjust the filter to see other files.</small>}
     {excluded.length > 0 && <details className="excluded-results">
       <summary>Excluded ({excluded.length}) · {bytes(preview.audio_bytes - preview.eligible_bytes)}</summary>
       <FolderTree preview={preview} files={excluded} selected={selected} onSelect={chooseFile}
+        queuedKeys={queuedKeys}
         onFileMenu={openFileMenu} canQueue={false} />
     </details>}
     {expired && <small className="warn">Preview expired. Refresh this folder before downloading.</small>}

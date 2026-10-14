@@ -127,6 +127,103 @@ describe("authenticated mixed-batch workflow", () => {
       .send({ candidateIds: [candidates[0].id] })).status).toBe(409);
   });
 
+  it("queues another folder and search hit after a first album without duplicating its files", async () => {
+    const { app, worker, folderFiles, port, transfers, setSnapshot } = setup();
+    const second = { ...remote("bob\\Hybrid Theory\\01 - Papercut.flac"), username: "bob" };
+    const third = { ...remote("bob\\Meteora\\01 - Foreword.flac"), username: "bob" };
+    folderFiles.push(second, third);
+    setSnapshot({ id: "search-1", state: "Completed", finished: true,
+      reportedFileCount: 3, reportedResponseCount: 2, results: [folderFiles[0]!, second, third] });
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Linkin Park", defaultType: "search", mode: "review",
+      entries: [{ original: "Linkin Park", queryText: "Linkin Park", type: "search",
+        seedKind: "track_seed", quality: "any" }]
+    });
+    await worker.runOnce();
+    const detail = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const [firstHit, secondHit, thirdHit] = detail.candidates;
+    const firstPreview = await request(app).post(`/api/requests/${detail.id}/preview`).set(auth)
+      .send({ candidateId: firstHit.id });
+    expect(firstPreview.status).toBe(200);
+    expect((await request(app).post(`/api/requests/${detail.id}/queue-folder`).set(auth)
+      .send({ previewId: firstPreview.body.id })).status).toBe(202);
+    await worker.runOnce();
+    for (const transfer of transfers) {
+      transfer.status = "completed";
+      transfer.transferred = transfer.size;
+    }
+    await worker.runOnce();
+    expect((await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0].status)
+      .toBe("completed");
+
+    const secondPreview = await request(app).post(`/api/requests/${detail.id}/preview`).set(auth)
+      .send({ candidateId: secondHit.id });
+    expect(secondPreview.status).toBe(200);
+    expect((await request(app).post(`/api/requests/${detail.id}/queue-folder`).set(auth)
+      .send({ previewId: secondPreview.body.id })).status).toBe(202);
+    expect((await request(app).post(`/api/requests/${detail.id}/select-hits`).set(auth)
+      .send({ candidateIds: [thirdHit.id] })).status).toBe(202);
+    expect((await request(app).post(`/api/requests/${detail.id}/queue-folder`).set(auth)
+      .send({ previewId: firstPreview.body.id })).status).toBe(409);
+    expect((await request(app).post(`/api/requests/${detail.id}/select-hits`).set(auth)
+      .send({ candidateIds: [secondHit.id] })).status).toBe(409);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledTimes(firstPreview.body.eligible_count + 2);
+    let updated = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(updated.jobs).toHaveLength(2);
+    expect(updated.transfers).toHaveLength(firstPreview.body.eligible_count + 2);
+    expect(updated.jobs.find((job: { directory: string }) => job.directory === firstPreview.body.directory).status)
+      .toBe("completed");
+    for (const transfer of transfers) {
+      transfer.status = "completed";
+      transfer.transferred = transfer.size;
+    }
+    await worker.runOnce();
+    updated = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(updated.status).toBe("completed");
+    expect(updated.jobs.every((job: { status: string }) => job.status === "completed")).toBe(true);
+  });
+
+  it("can queue the remaining files in a partially selected manual folder", async () => {
+    const { app, worker, transfers, port } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial Untrue", defaultType: "search", mode: "review",
+      entries: [{ original: "Burial Untrue", queryText: "Burial Untrue", type: "search",
+        seedKind: "track_seed", quality: "any" }]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const preview = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(preview.status).toBe(200);
+    const paths = preview.body.files.map((file: { path: string }) => file.path);
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: preview.body.id, selectedPaths: [paths[0]] })).status).toBe(202);
+    await worker.runOnce();
+    transfers[0]!.status = "completed";
+    transfers[0]!.transferred = transfers[0]!.size;
+    await worker.runOnce();
+    expect((await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0].status).toBe("partial");
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: preview.body.id, selectedPaths: paths.slice(1) })).status).toBe(202);
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: preview.body.id, selectedPaths: [paths[0]] })).status).toBe(409);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledTimes(paths.length);
+    for (const transfer of transfers) {
+      transfer.status = "completed";
+      transfer.transferred = transfer.size;
+    }
+    await worker.runOnce();
+    const updated = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    expect(updated.status).toBe("completed");
+    expect(updated.jobs).toHaveLength(2);
+    expect(updated.jobs.every((job: { status: string; unselected_count: number }) =>
+      job.status === "completed" && job.unselected_count === 0)).toBe(true);
+  });
+
   it("rejects duplicate, ineligible, foreign and oversized hit selections atomically", async () => {
     const { app, worker, store, folderFiles, setSnapshot } = setup();
     const other = { ...remote("Music\\Song.flac"), username: "bob" };
@@ -179,6 +276,11 @@ describe("authenticated mixed-batch workflow", () => {
     expect(result.status).toBe(400);
     expect(result.body.error).toBe("Duplicate remote file selection");
     expect(store.all("SELECT id FROM transfers")).toHaveLength(0);
+    expect((await request(app).post(`/api/requests/${item.id}/select-hits`).set(auth)
+      .send({ candidateIds: [item.candidates[0].id] })).status).toBe(202);
+    expect((await request(app).post(`/api/requests/${item.id}/select-hits`).set(auth)
+      .send({ candidateIds: [item.candidates[1].id] })).status).toBe(409);
+    expect(store.all("SELECT id FROM transfers")).toHaveLength(1);
   });
 
   it("checks the exact selected hit's metadata when queueing strict-quality files", async () => {
@@ -470,7 +572,7 @@ describe("authenticated mixed-batch workflow", () => {
     expect(store.batchDetail(created.body.id)?.requests[0]?.previews).toHaveLength(0);
   });
 
-  it("searches all files without an upfront track/folder choice and queues one selected result", async () => {
+  it("searches without an upfront choice and allows inspecting another file after one hit was queued", async () => {
     const { app, port, worker } = setup();
     const auth = await login(app);
     const created = await request(app).post("/api/batches").set(auth).send({
@@ -486,10 +588,14 @@ describe("authenticated mixed-batch workflow", () => {
       .send({ candidateId: item.candidates[0].id })).status).toBe(200);
     expect((await request(app).post(`/api/requests/${item.id}/select`).set(auth)
       .send({ candidateId: item.candidates[0].id })).status).toBe(202);
-    expect((await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
-      .send({ candidateId: item.candidates[0].id })).status).toBe(409);
+    const refreshed = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(refreshed.status).toBe(200);
+    const cover = refreshed.body.files.find((file: { path: string }) => file.path.endsWith("cover.jpg"));
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: refreshed.body.id, selectedPaths: [cover.path] })).status).toBe(202);
     await worker.runOnce();
-    expect(port.enqueue).toHaveBeenCalledOnce();
+    expect(port.enqueue).toHaveBeenCalledTimes(2);
   });
 
   it("queues a selected subset of a folder from the same untyped search", async () => {
@@ -788,6 +894,8 @@ describe("authenticated mixed-batch workflow", () => {
     const result = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
     expect(result.status).toBe("partial");
     expect(result.jobs[0]).toMatchObject({ excluded_count: 0, selected_count: 1, unselected_count: 2 });
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: inspected.body.id, selectedPaths: [inspected.body.files[1].path] })).status).toBe(409);
   });
 
   it("uses exact search-hit metadata when the peer omits it in a folder browse", async () => {

@@ -4,7 +4,7 @@
 
 Phonofetch is a self-hosted Soulseek search and download interface for an **existing slskd** instance. Search across peers, inspect folders, choose files and follow transfers from a desktop or phone. slskd and your downloads stay on your server.
 
-Search directly from the Dashboard, or use the Search tab for multiple queries and optional automatic downloads. In an inspected folder, **Download all** includes selectable audio and non-audio files; **Download selected** queues only the checked files.
+Search directly from the Dashboard, or use the Search tab for multiple queries and optional automatic downloads. Manual searches can queue files from several folders; already queued files cannot be selected again. In an inspected folder, **Download all** includes selectable audio and non-audio files; **Download selected** queues only the checked files.
 
 ## Screenshots
 

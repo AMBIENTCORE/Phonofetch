@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Candidate, MusicRequest, RemoteFile, TransferItem } from "../shared/types";
+import type { Candidate, FolderJob, MusicRequest, RemoteFile, RequestStatus, TransferItem } from "../shared/types";
 import type { Config } from "./config";
 import { Store } from "./db";
 import { manualSelectionCheck, normalize, qualityCheck, rankFile, rankFolder } from "./matching";
@@ -374,26 +374,39 @@ export class Worker {
   }
 
   private updateAggregates(): void {
+    const aggregate = (items: TransferItem[], partialFolder: boolean, folderJobs: boolean): RequestStatus => {
+      if (items.some(item => item.status === "uncertain")) return "uncertain";
+      const terminal = items.every(item => ["completed", "failed", "cancelled"].includes(item.status));
+      if (terminal) {
+        if (items.every(item => item.status === "completed")) return partialFolder ? "partial" : "completed";
+        if (folderJobs && items.some(item => item.status === "completed")) return "partial";
+        return items.every(item => item.status === "cancelled") ? "cancelled" : "failed";
+      }
+      return items.every(item => ["ready", "queueing"].includes(item.status)) ? "queueing" : "active";
+    };
     const ids = this.store.all<{ request_id: string }>("SELECT DISTINCT request_id FROM transfers");
     for (const { request_id } of ids) {
       const transfers = this.store.all<TransferItem>("SELECT * FROM transfers WHERE request_id=?", request_id);
-      const job = this.store.get<{ id: string; excluded_count: number; unselected_count: number }>(
-        "SELECT id,excluded_count,unselected_count FROM folder_jobs WHERE request_id=? ORDER BY created_at DESC LIMIT 1", request_id);
-      const terminal = transfers.every(t => ["completed", "failed", "cancelled", "uncertain"].includes(t.status));
-      const allDone = transfers.every(t => t.status === "completed");
-      const status = transfers.some(t => t.status === "uncertain") ? "uncertain" :
-        terminal ? allDone ? (job?.excluded_count || job?.unselected_count ? "partial" : "completed") :
-          transfers.some(t => t.status === "completed") && job ? "partial" :
-            transfers.every(t => t.status === "cancelled") ? "cancelled" : "failed" :
-        transfers.every(t => t.status === "ready" || t.status === "queueing") ? "queueing" : "active";
+      const jobs = this.store.all<Pick<FolderJob, "id" | "status" | "excluded_count" | "unselected_count">>(
+        "SELECT id,status,excluded_count,unselected_count FROM folder_jobs WHERE request_id=?", request_id);
+      for (const job of jobs) {
+        const files = transfers.filter(transfer => transfer.folder_job_id === job.id);
+        if (!files.length) continue;
+        const status = aggregate(files, Boolean(job.excluded_count || job.unselected_count), true);
+        if (status !== job.status)
+          this.store.run("UPDATE folder_jobs SET status=?,updated_at=? WHERE id=?",
+            status, new Date().toISOString(), job.id);
+      }
+      const excluded = jobs.reduce((sum, job) => sum + job.excluded_count, 0);
+      const unselected = jobs.reduce((sum, job) => sum + job.unselected_count, 0);
+      const status = aggregate(transfers, Boolean(excluded || unselected), jobs.length > 0);
       const current = this.store.get<MusicRequest>("SELECT * FROM requests WHERE id=?", request_id);
       if (current && current.status !== status) {
         this.store.run("UPDATE requests SET status=?,updated_at=? WHERE id=?", status, new Date().toISOString(), request_id);
-        if (job) this.store.run("UPDATE folder_jobs SET status=?,updated_at=? WHERE id=?", status, new Date().toISOString(), job.id);
         this.store.event(status === "completed" ? "success" : ["partial", "failed", "uncertain"].includes(status) ? "warning" : "info",
-          "request", "status_changed", `Request ${status}${job?.excluded_count || job?.unselected_count ?
-            `; ${job.excluded_count} quality-excluded, ${job.unselected_count} unselected (partial folder)` : ""}`,
-          { batchId: current.batch_id, requestId: request_id, folderJobId: job?.id });
+          "request", "status_changed", `Request ${status}${excluded || unselected ?
+            `; ${excluded} quality-excluded, ${unselected} unselected (partial folder)` : ""}`,
+          { batchId: current.batch_id, requestId: request_id, folderJobId: jobs.length === 1 ? jobs[0]!.id : undefined });
       }
     }
   }

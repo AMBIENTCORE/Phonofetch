@@ -10,6 +10,7 @@ import { normalize, parseLines } from "./matching";
 import type { SlskdPort } from "./port";
 import { SlskdError, SlskdRequestError, SlskdShapeError } from "./slskd";
 import { Workflow } from "./workflow";
+import { canInspectFolder, canQueueSearchHits } from "../shared/search-selection";
 
 const uuid = z.uuid();
 const entry = z.object({
@@ -138,20 +139,20 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
   });
   app.post("/api/requests/:id/select-hits", (req, res) => {
     const request = getRequest(req.params.id);
-    if (request.status !== "review" && !(request.status === "no_results" && request.mode === "review"))
+    if (!canQueueSearchHits(request))
       throw new ApiError(409, "Request is not awaiting review");
     const { candidateIds } = z.object({ candidateIds: z.array(uuid).min(1).max(Math.max(1000, config.MAX_FOLDER_FILES)) }).parse(req.body);
     res.status(202).json({ ids: workflow.queueSearchHits(request, candidateIds) });
   });
   app.post("/api/requests/:id/preview", async (req, res) => {
     const request = getRequest(req.params.id);
-    if (request.status !== "review" && request.status !== "no_results") throw new ApiError(409, "Request is not awaiting review");
+    if (!canInspectFolder(request)) throw new ApiError(409, "Request is not awaiting review");
     const { candidateId, recursive } = z.object({ candidateId: uuid, recursive: z.boolean().default(false) }).parse(req.body);
     res.json(await workflow.preview(request, getCandidate(request, candidateId), recursive));
   });
   app.post("/api/requests/:id/queue-folder", async (req, res) => {
     const request = getRequest(req.params.id);
-    if (request.status !== "review" && request.status !== "no_results") throw new ApiError(409, "Request is not awaiting review");
+    if (!canInspectFolder(request)) throw new ApiError(409, "Request is not awaiting review");
     const { previewId, selectedPaths } = z.object({
       previewId: uuid, selectedPaths: z.array(z.string().min(1).max(1024))
         .max(Math.max(1000, config.MAX_FOLDER_FILES)).optional()

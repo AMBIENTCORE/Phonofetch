@@ -5,6 +5,7 @@ import type { Config } from "./config";
 import { Store } from "./db";
 import { isSupportedAudioFile, manualSelectionCheck, mergeAudioMetadata, qualityCheck, rankFolder, withinDirectory } from "./matching";
 import type { SlskdPort } from "./port";
+import { canAppendManualSearch, canInspectFolder, canQueueSearchHits, remoteFileKey } from "../shared/search-selection";
 
 export class Workflow {
   constructor(readonly store: Store, readonly port: SlskdPort, readonly config: Config) {}
@@ -48,10 +49,10 @@ export class Workflow {
       const eligibleBytes = files.reduce((total, file) => total + (file.eligible ? file.size : 0), 0);
       if (automatic && eligibleBytes > this.config.MAX_FOLDER_BYTES)
         throw new ApiError(413, "Eligible files exceed configured size limit");
-      const latest = this.store.get<Pick<MusicRequest, "quality" | "type" | "status">>(
-        "SELECT quality,type,status FROM requests WHERE id=?", request.id);
+      const latest = this.store.get<Pick<MusicRequest, "quality" | "type" | "mode" | "status">>(
+        "SELECT quality,type,mode,status FROM requests WHERE id=?", request.id);
       if (!latest || latest.quality !== request.quality || latest.type !== request.type ||
-        !["review", "no_results"].includes(latest.status))
+        latest.mode !== request.mode || !canInspectFolder(latest))
         throw new ApiError(409, "Search settings changed; inspect this folder again");
       const preview = this.store.savePreview({ request_id: request.id, username: candidate.username,
         directory: candidate.directory, recursive, files });
@@ -103,23 +104,30 @@ export class Workflow {
       throw new ApiError(409, "Remote folder changed or was inspected before all files were shown; refresh it before queueing");
     const id = randomUUID();
     this.store.transaction(() => {
-      const latest = this.store.get<Pick<MusicRequest, "quality" | "type" | "status">>(
-        "SELECT quality,type,status FROM requests WHERE id=?", request.id);
+      const latest = this.store.get<Pick<MusicRequest, "quality" | "type" | "mode" | "status">>(
+        "SELECT quality,type,mode,status FROM requests WHERE id=?", request.id);
       if (!latest || latest.quality !== request.quality || latest.type !== request.type ||
-        !["review", "no_results"].includes(latest.status))
+        latest.mode !== request.mode || !canInspectFolder(latest))
         throw new ApiError(409, "Search settings changed; inspect this folder again");
-      const active = this.store.get<{ id: string }>("SELECT id FROM transfers WHERE request_id=? LIMIT 1", request.id);
-      if (active) throw new ApiError(409, "This request already has transfers; no duplicate enqueue");
+      const queued = this.store.all<{ username: string; path: string }>(
+        "SELECT username,path FROM transfers WHERE request_id=?", request.id);
+      if (queued.length && !canAppendManualSearch(latest))
+        throw new ApiError(409, "This request already has transfers; no duplicate enqueue");
+      const queuedKeys = new Set(queued.map(remoteFileKey));
+      if (selected.some(file => queuedKeys.has(remoteFileKey(file))))
+        throw new ApiError(409, "Selection contains an already queued file");
+      const remaining = eligible.filter(file => !queuedKeys.has(remoteFileKey(file)));
       const date = new Date().toISOString();
+      this.updateFolderRemainders(request, queuedKeys, selected);
       this.store.run(`INSERT INTO folder_jobs(id,request_id,preview_id,username,directory,recursive,discovered_count,eligible_count,excluded_count,selected_count,unselected_count,estimated_bytes,status,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, request.id, preview.id, preview.username, preview.directory,
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, request.id, preview.id, preview.username, preview.directory,
       Number(preview.recursive), preview.files.length, preview.eligible_count, preview.excluded_count,
-      selected.length, eligible.length - selected.length, selectedBytes, "queueing", date, date);
+      selected.length, remaining.length - selected.length, selectedBytes, "queueing", date, date);
       for (const file of selected) this.insertTransfer(request, id, file);
       this.store.run("UPDATE requests SET status='queueing',selected_directory=?,score=?,explanation=?,updated_at=? WHERE id=?",
         preview.directory, evidence.score, evidence.explanation, date, request.id);
       this.store.event("success", "folder", "confirmed",
-        `${selected.length} of ${eligible.length} selectable files selected (${preview.excluded_count} unavailable, ${eligible.length - selected.length} unselected)`,
+        `${selected.length} of ${remaining.length} remaining files selected (${preview.excluded_count} unavailable, ${remaining.length - selected.length} unselected)`,
         { batchId: request.batch_id, requestId: request.id, folderJobId: id },
         { directory: preview.directory, username: preview.username, selectedBytes, evidence });
     });
@@ -153,13 +161,14 @@ export class Workflow {
     if (candidateIds.length > this.config.MAX_FOLDER_FILES) throw new ApiError(413, "Selection exceeds configured file limit");
     if (new Set(candidateIds).size !== candidateIds.length) throw new ApiError(400, "Duplicate file selection");
     return this.store.transaction(() => {
-      const latest = this.store.get<Pick<MusicRequest, "status" | "type" | "quality">>(
-        "SELECT status,type,quality FROM requests WHERE id=?", request.id);
-      if (!latest || !["review", "no_results"].includes(latest.status) ||
-        latest.status === "no_results" && request.mode !== "review" ||
-        latest.type !== request.type || latest.quality !== request.quality)
+      const latest = this.store.get<Pick<MusicRequest, "status" | "type" | "mode" | "quality">>(
+        "SELECT status,type,mode,quality FROM requests WHERE id=?", request.id);
+      if (!latest || !canQueueSearchHits(latest) ||
+        latest.type !== request.type || latest.mode !== request.mode || latest.quality !== request.quality)
         throw new ApiError(409, "Search settings changed; select files again");
-      if (this.store.get("SELECT id FROM transfers WHERE request_id=? LIMIT 1", request.id))
+      const queued = this.store.all<{ username: string; path: string }>(
+        "SELECT username,path FROM transfers WHERE request_id=?", request.id);
+      if (queued.length && !canAppendManualSearch(latest))
         throw new ApiError(409, "This search already has transfers; no duplicate enqueue");
       const selected = candidateIds.map(id => {
         const row = this.store.get<{ id: string; username: string; path: string; directory: string;
@@ -176,10 +185,14 @@ export class Workflow {
       });
       const paths = selected.map(item => JSON.stringify([item.username, item.path.replace(/\\/g, "/")]));
       if (new Set(paths).size !== paths.length) throw new ApiError(400, "Duplicate remote file selection");
+      const queuedKeys = new Set(queued.map(remoteFileKey));
+      if (selected.some(item => queuedKeys.has(remoteFileKey(item.file))))
+        throw new ApiError(409, "Selection contains an already queued file");
       const totalBytes = selected.reduce((sum, item) => sum + item.file.size, 0);
       if (!Number.isSafeInteger(totalBytes) || totalBytes > this.config.MAX_FOLDER_BYTES)
         throw new ApiError(413, "Selected files exceed configured size limit");
       const ids = selected.map(item => this.insertTransfer(request, null, item.file));
+      this.updateFolderRemainders(request, queuedKeys, selected.map(item => item.file));
       for (const item of selected) this.store.run("UPDATE candidates SET selected=1 WHERE id=?", item.id);
       const date = new Date().toISOString();
       this.store.run(`UPDATE requests SET status='queueing',selected_candidate_id=?,selected_directory=?,
@@ -193,6 +206,20 @@ export class Workflow {
         { batchId: request.batch_id, requestId: request.id }, { selectedCount: selected.length, totalBytes });
       return ids;
     });
+  }
+
+  private updateFolderRemainders(request: MusicRequest, queued: ReadonlySet<string>, selected: RemoteFile[]): void {
+    const allQueued = new Set([...queued, ...selected.map(remoteFileKey)]);
+    const jobs = this.store.all<{ id: string; files: string }>(
+      `SELECT j.id,p.files FROM folder_jobs j JOIN folder_previews p ON p.id=j.preview_id
+       WHERE j.request_id=?`, request.id);
+    for (const job of jobs) {
+      const remaining = (JSON.parse(job.files) as PreviewFile[]).filter(file =>
+        (request.mode === "automatic" ? qualityCheck(file, request.quality) : manualSelectionCheck(file)).eligible &&
+        !allQueued.has(remoteFileKey(file))).length;
+      this.store.run("UPDATE folder_jobs SET unselected_count=?,updated_at=? WHERE id=?",
+        remaining, new Date().toISOString(), job.id);
+    }
   }
 
   private insertTransfer(request: MusicRequest, jobId: string | null, file: RemoteFile): string {

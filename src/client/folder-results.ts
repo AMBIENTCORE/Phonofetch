@@ -1,16 +1,21 @@
 import type { Candidate, FolderPreview, RequestStatus, RequestType } from "../shared/types";
+import { canQueueSearchHits, remoteFileKey } from "../shared/search-selection";
 
 export const AUTO_FOLDER_PREVIEW_LIMIT = 5;
 
 export const folderKey = (requestId: string, username: string, directory: string, recursive: boolean): string =>
   JSON.stringify([requestId, username, directory, recursive]);
 
-export function searchHitSelectionReason(request: { type: RequestType; status: RequestStatus; transfers: readonly unknown[] },
-  candidate: Pick<Candidate, "eligible" | "reason">): string | null {
+export function searchHitSelectionReason(request: { type: RequestType; mode: "review" | "automatic";
+  status: RequestStatus; transfers: readonly { username: string; path: string }[] },
+  candidate: Pick<Candidate, "eligible" | "reason" | "username" | "path">): string | null {
   if (!candidate.eligible) return candidate.reason;
   if (request.type === "track") return "Select one track";
-  if (request.transfers.length) return "Already queued";
-  if (request.status !== "review") return "Search not ready";
+  if (request.transfers.some(transfer => remoteFileKey(transfer) === remoteFileKey(candidate)))
+    return "Already queued";
+  if (!canQueueSearchHits(request))
+    return request.transfers.length ? "Already queued" : "Search not ready";
+  if (request.type !== "search" && request.transfers.length) return "Already queued";
   return null;
 }
 

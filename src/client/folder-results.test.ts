@@ -23,13 +23,15 @@ describe("bounded folder inspection", () => {
   });
 
   describe("search-hit queue availability", () => {
-    const hit = { eligible: true, reason: "Any quality explicitly selected" };
+    const hit = { username: "peer", path: "Music\\Album\\Track.flac",
+      eligible: true, reason: "Any quality explicitly selected" };
 
     it("keeps search-hit selection available when folder inspection fails or is busy", () => {
-      const search = { type: "search" as const, status: "review" as const, transfers: [] };
+      const search = { type: "search" as const, mode: "review" as const,
+        status: "review" as const, transfers: [] };
       expect(searchHitSelectionReason(search, hit)).toBeNull();
       expect(searchHitSelectionReason({ ...search, type: "album_folder" }, hit)).toBeNull();
-      expect(searchHitSelectionReason(search, { eligible: false, reason: "Not a supported audio file" }))
+      expect(searchHitSelectionReason(search, { ...hit, eligible: false, reason: "Not a supported audio file" }))
         .toBe("Not a supported audio file");
     });
 
@@ -54,12 +56,23 @@ describe("bounded folder inspection", () => {
     });
 
     it("explains why a saved result cannot be selected for download", () => {
-      expect(searchHitSelectionReason({ type: "track", status: "review", transfers: [] }, hit))
+      expect(searchHitSelectionReason({ type: "track", mode: "review", status: "review", transfers: [] }, hit))
         .toBe("Select one track");
-      expect(searchHitSelectionReason({ type: "search", status: "queueing", transfers: [{}] }, hit))
+      expect(searchHitSelectionReason({ type: "search", mode: "review", status: "queueing",
+        transfers: [{ username: "peer", path: "Music\\Album\\Track.flac" }] }, hit))
         .toBe("Already queued");
-      expect(searchHitSelectionReason({ type: "search", status: "no_results", transfers: [] }, hit))
+      expect(searchHitSelectionReason({ type: "search", mode: "automatic", status: "no_results", transfers: [] }, hit))
         .toBe("Search not ready");
+    });
+
+    it("marks only the queued file, not the other albums in a manual search", () => {
+      const first = { ...hit, username: "peer", path: "Music\\Album A\\Track.flac" };
+      const other = { ...hit, username: "peer", path: "Music\\Album B\\Track.flac" };
+      const request = { type: "search" as const, mode: "review" as const, status: "active" as const,
+        transfers: [{ username: "peer", path: "Music/Album A/Track.flac" }] };
+      expect(searchHitSelectionReason(request, first)).toBe("Already queued");
+      expect(searchHitSelectionReason(request, other)).toBeNull();
+      expect(searchHitSelectionReason({ ...request, status: "completed" }, other)).toBeNull();
     });
   });
 
