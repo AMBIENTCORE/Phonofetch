@@ -219,6 +219,12 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .candidate strong { display: block; }
 .peer-group { min-width: 0; border-top: 1px solid var(--line); }
 .peer-group > summary { padding: .48rem .3rem; cursor: pointer; font-weight: 700; overflow-wrap: anywhere; }
+.folder-result > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .35rem; font-weight: 400; }
+.folder-result-peer, .folder-result-path { font-weight: 700; }
+.folder-result-path { min-width: 0; overflow-wrap: anywhere; }
+.folder-result-match { color: var(--muted); }
+.folder-result .candidate > span { display: none; }
+.folder-result .candidate > button { margin-left: auto; }
 .directory-group { min-width: 0; margin-left: .8rem; border-top: 1px solid #303133; }
 .directory-group > summary { padding: .38rem .3rem; cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
 .search-results { max-height: 550px; overflow: auto; border-bottom: 1px solid var(--line); }

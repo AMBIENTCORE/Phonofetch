@@ -556,12 +556,18 @@ function FolderCandidateList({ peers, mobile, ...body }: FolderListProps): React
         </div>
       </details>;
     }))}</div>;
-  return <>{sorted.map(([username, folders]) => <Collapsible className="peer-group" initiallyOpen key={username}>
-    <summary>{username}{folders.length > 1 ? ` (${folders.length})` : ""} · {peerDetails(folders[0]?.[1][0])}</summary>
-    {folders.map(([key, hits]) => <div className="folder-candidate" key={key}>
-      <FolderCandidateBody {...body} candidate={hits[0]!} hits={hits} folderId={key} />
-    </div>)}
-  </Collapsible>)}</>;
+  return <>{sorted.flatMap(([username, folders]) => folders.map(([key, hits]) => {
+    const candidate = hits[0]!;
+    return <Collapsible className="peer-group folder-result" initiallyOpen key={key}>
+      <summary><span className="folder-result-peer">{username}{folders.length > 1 ? ` (${folders.length})` : ""} ·
+        {" "}{peerDetails(candidate)} ·{" "}</span>
+        <strong className="folder-result-path">{candidate.directory || "Shared files"}</strong>
+        <span className="folder-result-match">{" "}[{Math.round(candidate.score * 100)}%]</span></summary>
+      <div className="folder-candidate">
+        <FolderCandidateBody {...body} candidate={candidate} hits={hits} folderId={key} />
+      </div>
+    </Collapsible>;
+  }))}</>;
 }
 
 function FolderCandidateBody({ request, candidate, hits, folderId, recursive, canInspect, busy, inspecting,

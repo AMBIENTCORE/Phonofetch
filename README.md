@@ -8,7 +8,7 @@ Search directly from the Dashboard, or use the Search tab for multiple queries a
 
 ## Screenshots
 
-**Search:** inspect a folder before downloading, or filter the results to find specific files.
+**Search:** see each peer's full folder path and match score, then inspect or filter files before downloading.
 
 ![Phonofetch search results for Forest Drive West's Recursion EP](./docs/search-results-demo.png)
 
