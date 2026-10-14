@@ -6,7 +6,7 @@ Phonofetch is a self-hosted Soulseek search and download interface for an **exis
 
 Search directly from the Dashboard, or use the Search tab for multiple queries and optional automatic downloads. Manual searches can queue files from several folders; already queued files cannot be selected again. In an inspected folder, **Download all** includes selectable audio and non-audio files; **Download selected** queues only the checked files.
 
-The Dashboard, Downloads and Activity Log have filterable tables with clickable sort headers; track-result tables sort the same way. Recent downloads and the Downloads table group files by search; Downloads also offers a peer/folder view within each search. Ongoing files start in queue order; finished files start newest first. Active progress bars estimate movement between updates (marked `≈`); transferred bytes and completion still come from slskd.
+The Dashboard, Downloads and Activity Log have filterable tables with clickable sort headers; track-result tables sort the same way. Recent downloads group files by search; the Downloads table and optional collapsible view nest each search's files under their peer and folder, so the path appears once per folder. Ongoing files start in queue order; finished files start newest first. Active progress bars estimate movement between updates (marked `≈`); transferred bytes and completion still come from slskd.
 
 Failed downloads display the reason reported by slskd when available. If no detail is reported, inspect that transfer in slskd.
 

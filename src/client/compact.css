@@ -169,6 +169,11 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .download-group-heading th { font-weight: 700; }
 .download-group-heading th small { float: right; margin-left: .5rem; font-weight: 400;
   font-variant-numeric: tabular-nums; }
+.download-table .download-peer-heading th { padding: .55rem .75rem; border-bottom: 0;
+  background: #202b31; color: var(--ink); white-space: normal; }
+.download-table .download-folder-heading th { padding: .5rem 1.3rem; border-bottom: 0;
+  background: #1d272c; color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
+.download-table .download-file-cell { padding-left: 1.6rem; }
 .batch-progress { display: block; width: min(100%, 240px); height: 4px; margin-top: .35rem; border-radius: 4px; background: #353638; }
 .batch-progress span { display: block; height: 100%; border-radius: inherit; background: #bcbcbc; }
 .batch-tally { flex: none; text-align: right; }
@@ -430,6 +435,7 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   :root .data-table thead .sort-heading { display: inline-flex; align-items: center;
     min-height: 44px; padding: 0 .1rem; font-size: .85rem; }
   .data-table tbody { display: grid; gap: .65rem; }
+  .download-table tbody { gap: .45rem; }
   .data-table tbody + tbody { margin-top: .65rem; }
   .data-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: .35rem .75rem; padding: .75rem; border: 1px solid var(--line); border-radius: 10px; }
@@ -440,6 +446,13 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .data-table tr.download-group-heading { padding: .25rem .6rem; background: #253138; }
   .data-table .download-group-heading th { grid-column: 1 / -1; padding: .25rem 0; border: 0; }
   .download-group-heading th small { float: none; display: block; margin: .2rem 0 0; }
+  .download-table tr.download-peer-heading, .download-table tr.download-folder-heading {
+    padding: 0 .45rem; border: 0; border-radius: 0; background: transparent; }
+  .download-table .download-peer-heading th, .download-table .download-folder-heading th {
+    grid-column: 1 / -1; padding: .15rem 0; background: transparent; }
+  .download-table .download-folder-heading th { padding-left: .55rem; }
+  .download-table .download-peer-cell { display: none; }
+  .download-table .download-file-cell { padding-left: 0; }
   .data-table td::before { display: block; margin-bottom: .12rem; color: var(--muted);
     content: attr(data-label); font-size: .76rem; font-weight: 600; }
   .data-table td time { white-space: normal; }

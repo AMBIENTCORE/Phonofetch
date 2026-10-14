@@ -1,4 +1,5 @@
 import type { DownloadItem } from "../shared/types";
+import { parentDirectory } from "../server/matching";
 
 export function groupDownloads(items: DownloadItem[]): Array<{
   batchId: string; label: string; files: DownloadItem[]; multipleQueries: boolean;
@@ -17,4 +18,27 @@ export function groupDownloads(items: DownloadItem[]): Array<{
         files[0]!.query_text : `${queries.size} queries`}`
     };
   });
+}
+
+export function groupDownloadPeers(items: DownloadItem[]): Array<{
+  username: string; files: DownloadItem[];
+  folders: Array<{ directory: string; files: DownloadItem[] }>;
+}> {
+  const peers = new Map<string, { files: DownloadItem[]; folders: Map<string, DownloadItem[]> }>();
+  for (const item of items) {
+    let peer = peers.get(item.username);
+    if (!peer) {
+      peer = { files: [], folders: new Map() };
+      peers.set(item.username, peer);
+    }
+    peer.files.push(item);
+    const directory = parentDirectory(item.path);
+    const files = peer.folders.get(directory) ?? [];
+    files.push(item);
+    peer.folders.set(directory, files);
+  }
+  return [...peers].map(([username, peer]) => ({
+    username, files: peer.files,
+    folders: [...peer.folders].map(([directory, files]) => ({ directory, files }))
+  }));
 }

@@ -4,7 +4,7 @@ import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsDa
 import { parentDirectory, parseLines } from "../server/matching";
 import { readApiResponse } from "./api-response";
 import { audioDetails, fileFormat } from "./audio-details";
-import { groupDownloads } from "./download-groups";
+import { groupDownloadPeers, groupDownloads } from "./download-groups";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 import { observedRate, predictedProgress, type ProgressSample } from "./progress-estimate";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
@@ -382,7 +382,7 @@ function DownloadsPage({ reload, action, busy }: {
           aria-pressed={view === "grouped"} onClick={() => setView("grouped")}>Grouped</button>
       </div>
       <small>Ongoing files start in queue order; finished files start newest first. Headings sort before loading more;
-        search groups follow their first sorted file.
+        search, peer, and folder groups follow their first sorted file.
         {filterText && " Filtering loaded entries; load more to include additional files."}</small>
     </div>
     <div className="mobile-download-tabs" role="group" aria-label="Download status">
@@ -1055,36 +1055,25 @@ function DownloadTree({ items, action, busy, expandFolders, sampleAt }: { items:
   return <><div className="disclosure-toolbar"><button className="secondary" type="button"
     onClick={disclosures.toggle}>{disclosures.allOpen ? "Collapse all" : "Expand all"}</button></div>
     <div className="download-tree" ref={disclosures.root}>{groupDownloads(items).map(group => {
-      const peers = new Map<string, Map<string, DownloadItem[]>>();
-      for (const item of group.files) {
-        let folders = peers.get(item.username);
-        if (!folders) { folders = new Map(); peers.set(item.username, folders); }
-        const directory = parentDirectory(item.path);
-        const files = folders.get(directory) ?? [];
-        files.push(item);
-        folders.set(directory, files);
-      }
       return <Collapsible className="download-search" initiallyOpen key={group.batchId}>
         <summary><strong><a href={`#/search/${group.batchId}`} onClick={event => event.stopPropagation()}>
           {group.label}</a></strong><small>{group.files.length} file{group.files.length === 1 ? "" : "s"} · {
             bytes(group.files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
-        {[...peers].map(([username, folders]) => {
-          const peerFiles = [...folders.values()].flat();
-          return <Collapsible className="download-peer" initiallyOpen key={username}>
-            <summary><strong>{username}</strong><small>{peerFiles.length} file{peerFiles.length === 1 ? "" : "s"} · {
-              bytes(peerFiles.reduce((sum, file) => sum + file.size, 0))}</small></summary>
-            {[...folders].map(([directory, files]) =>
-              <Collapsible className="download-folder" initiallyOpen={expandFolders} key={directory}>
-                <summary><strong className="download-directory-desktop" title={directory}>{directory || "Shared files"}</strong>
-                  <strong className="download-directory-mobile" title={directory}>{basename(directory) || "Shared files"}</strong>
-                  <small>{files.length} file{files.length === 1 ? "" : "s"} · {
-                    bytes(files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
-                <small className="download-directory-path">{directory}</small>
-                {files.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy}
+        {groupDownloadPeers(group.files).map(peer =>
+          <Collapsible className="download-peer" initiallyOpen key={peer.username}>
+            <summary><strong>{peer.username}</strong><small>{peer.files.length} file{peer.files.length === 1 ? "" : "s"} · {
+              bytes(peer.files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
+            {peer.folders.map(folder =>
+              <Collapsible className="download-folder" initiallyOpen={expandFolders} key={folder.directory}>
+                <summary><strong className="download-directory-desktop" title={folder.directory}>{folder.directory || "Shared files"}</strong>
+                  <strong className="download-directory-mobile" title={folder.directory}>{basename(folder.directory) || "Shared files"}</strong>
+                  <small>{folder.files.length} file{folder.files.length === 1 ? "" : "s"} · {
+                    bytes(folder.files.reduce((sum, file) => sum + file.size, 0))}</small></summary>
+                <small className="download-directory-path">{folder.directory}</small>
+                {folder.files.map(item => <DownloadRow key={item.id} item={item} action={action} busy={busy}
                   showQueryLink={group.multipleQueries} sampleAt={sampleAt} />)}
               </Collapsible>)}
-          </Collapsible>;
-        })}
+          </Collapsible>)}
       </Collapsible>;
     })}</div></>;
 }
@@ -1103,19 +1092,26 @@ function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort
     <th scope="col">Actions</th>
   </tr></thead>{groupDownloads(items).map(group => <tbody key={group.batchId}>
     <DownloadGroupHeading group={group} columns={6} />
-    {group.files.map(item => <tr key={item.id}>
-      <td data-label="File / path"><strong title={item.path}>{basename(item.path)}</strong>
-        <small title={item.path}>{parentDirectory(item.path)}</small>
-        {group.multipleQueries && <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>View query</a></small>}
-        <TransferFailure item={item} /></td>
-      <td data-label="Peer">{item.username}</td>
-      <td data-label="Status"><TransferProgress item={item} sampleAt={sampleAt} /></td>
-      <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
-      <td data-label={dateColumn === "queued" ? "Queued" : "Updated"}>
-        <time dateTime={dateColumn === "queued" ? item.created_at : item.updated_at}>
-          {time(dateColumn === "queued" ? item.created_at : item.updated_at)}</time></td>
-      <td data-label="Actions" className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></td>
-    </tr>)}
+    {groupDownloadPeers(group.files).map(peer => <React.Fragment key={peer.username}>
+      <tr className="download-peer-heading"><th scope="row" colSpan={6}>{peer.username}</th></tr>
+      {peer.folders.map(folder => <React.Fragment key={folder.directory}>
+        <tr className="download-folder-heading"><th scope="row" colSpan={6} title={folder.directory}>
+          {folder.directory || "Shared files"}</th></tr>
+        {folder.files.map(item => <tr key={item.id} aria-label={`${peer.username}, ${
+          folder.directory || "Shared files"}, ${basename(item.path)}`}>
+          <td data-label="File / path" className="download-file-cell"><strong title={item.path}>{basename(item.path)}</strong>
+            {group.multipleQueries && <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>View query</a></small>}
+            <TransferFailure item={item} /></td>
+          <td data-label="Peer" className="download-peer-cell" aria-label={peer.username} />
+          <td data-label="Status"><TransferProgress item={item} sampleAt={sampleAt} /></td>
+          <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
+          <td data-label={dateColumn === "queued" ? "Queued" : "Updated"}>
+            <time dateTime={dateColumn === "queued" ? item.created_at : item.updated_at}>
+              {time(dateColumn === "queued" ? item.created_at : item.updated_at)}</time></td>
+          <td data-label="Actions" className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></td>
+        </tr>)}
+      </React.Fragment>)}
+    </React.Fragment>)}
   </tbody>)}</table></div>;
 }
 

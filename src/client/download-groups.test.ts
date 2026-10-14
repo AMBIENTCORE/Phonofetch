@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DownloadItem } from "../shared/types";
-import { groupDownloads } from "./download-groups";
+import { groupDownloadPeers, groupDownloads } from "./download-groups";
 
 const file = (id: string, batchId: string, query: string, requestId = batchId): DownloadItem => ({
   id, batch_id: batchId, batch_number: batchId === "one" ? 1 : 2,
@@ -25,5 +25,20 @@ describe("download search groups", () => {
     const groups = groupDownloads([file("1", "one", "Album", "query-1"),
       file("2", "one", "Single", "query-2")]);
     expect(groups[0]).toMatchObject({ label: "Search #1 · 2 queries", multipleQueries: true });
+  });
+
+  it("nests files under their peer and full folder path without changing their sorted order", () => {
+    const files = [
+      { ...file("3", "one", "Album"), path: "Music\\Album B\\03.flac" },
+      { ...file("1", "one", "Album"), path: "Music\\Album A\\01.flac" },
+      { ...file("2", "one", "Album"), path: "Music\\Album B\\02.flac" },
+      { ...file("4", "one", "Album"), username: "bob", path: "Music\\Album B\\04.flac" }
+    ];
+    const peers = groupDownloadPeers(files);
+    expect(peers.map(peer => [peer.username, peer.folders.map(folder =>
+      [folder.directory, folder.files.map(item => item.id)])])).toEqual([
+      ["alice", [["Music\\Album B", ["3", "2"]], ["Music\\Album A", ["1"]]]],
+      ["bob", [["Music\\Album B", ["4"]]]]
+    ]);
   });
 });
