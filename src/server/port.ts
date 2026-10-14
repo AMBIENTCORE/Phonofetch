@@ -17,6 +17,7 @@ export interface RemoteTransfer {
   size: number;
   transferred: number;
   status: Exclude<TransferStatus, "ready" | "queueing" | "uncertain">;
+  error?: string | null;
 }
 
 export interface SlskdPort {

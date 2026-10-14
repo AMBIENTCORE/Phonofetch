@@ -191,6 +191,28 @@ describe("worker retries and recovery", () => {
     ]);
   });
 
+  it("preserves slskd's failure reason and clears it only after the transfer recovers", async () => {
+    const h = harness();
+    const now = new Date().toISOString();
+    h.store.run("UPDATE requests SET status='active' WHERE id=?", h.id);
+    h.store.run(`INSERT INTO transfers(id,queue_id,request_id,username,path,size,status,created_at,updated_at)
+      VALUES(?,?,?,?,?,100,'queued',?,?)`, "local-failed", "q1", h.id, "alice", "Music\\Track.flac", now, now);
+    h.live.push({ id: "remote-failed", batchId: "q1", username: "alice", path: "Music\\Track.flac",
+      size: 100, transferred: 0, status: "failed", error: "Peer connection timed out" });
+    await h.worker.runOnce();
+    expect(h.store.downloads(10, 10).finished[0]).toMatchObject({
+      id: "local-failed", status: "failed", error: "Peer connection timed out"
+    });
+    expect(h.store.activity({ category: "transfer", search: "Peer connection timed out" })).toHaveLength(1);
+    h.store.run("UPDATE transfers SET error=NULL WHERE id='local-failed'");
+    await h.worker.runOnce();
+    expect(h.store.downloads(10, 10).finished[0]?.error).toBe("Peer connection timed out");
+    h.live[0]!.status = "active";
+    h.live[0]!.error = null;
+    await h.worker.runOnce();
+    expect(h.store.downloads(10, 10).active[0]).toMatchObject({ id: "local-failed", error: null });
+  });
+
   it("backs off on search failure and times out without creating duplicate searches", async () => {
     const h = harness();
     vi.mocked(h.port.startSearch).mockRejectedValueOnce(new Error("peer unavailable"));

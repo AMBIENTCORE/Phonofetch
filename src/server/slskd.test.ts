@@ -233,7 +233,11 @@ describe("slskd 0.26.1 REST adapter", () => {
       if (url.endsWith("/downloads") && init?.method === "GET") return json([
         { username: "alice", directories: [{ directory: "Burial\\Untrue", files: [
           { id: "slskd-transfer-id", batchId: "batch-id", username: "alice", filename: "Burial\\Untrue\\01 Archangel.mp3",
-            size: 3828401, bytesTransferred: 3828401, state: "Completed, Succeeded" }
+            size: 3828401, bytesTransferred: 3828401, state: "Completed, Succeeded" },
+          { id: "failed-transfer-id", batchId: "failed-batch", username: "alice", filename: "Burial\\Untrue\\02 Ghost.flac",
+            size: 12345, bytesTransferred: 0, state: "Completed, TimedOut", exception: "Peer connection timed out" },
+          { id: "unknown-transfer-id", batchId: "unknown-batch", username: "alice", filename: "Burial\\Untrue\\03 Song.flac",
+            size: 12345, bytesTransferred: 0, state: "Completed, Failed", exception: null }
         ] }] }
       ]);
       if (url.endsWith("/downloads/alice/slskd-transfer-id")) return new Response(null, { status: 204 });
@@ -243,7 +247,11 @@ describe("slskd 0.26.1 REST adapter", () => {
     expect(await adapter.enqueue("alice", { username: "alice", path: "Burial\\Untrue\\01 Archangel.mp3",
       directory: "Burial\\Untrue", size: 3828401, metadata: { bitrate: 320, sampleRate: null, bitDepth: null, vbr: false } },
     "batch-id")).toBe("slskd-transfer-id");
-    expect(await adapter.transfers()).toMatchObject([{ id: "slskd-transfer-id", batchId: "batch-id", status: "completed" }]);
+    expect(await adapter.transfers()).toMatchObject([
+      { id: "slskd-transfer-id", batchId: "batch-id", status: "completed" },
+      { id: "failed-transfer-id", status: "failed", error: "Peer connection timed out" },
+      { id: "unknown-transfer-id", status: "failed", error: "slskd reported failure without a detailed reason" }
+    ]);
     await adapter.cancel("alice", "slskd-transfer-id");
   });
 

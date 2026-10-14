@@ -131,6 +131,7 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
   align-items: center; gap: .65rem; padding: .35rem 0; border-top: 1px solid var(--line); }
 .download-file { min-width: 0; padding-left: 1.25rem; }
 .download-file strong, .download-file small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.download-file .warn { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 .download-bar { position: relative; display: grid; place-items: center; width: 100%; height: 27px;
   overflow: hidden; border: 1px solid #505153; border-radius: 4px; background: #292a2c; }
 .download-bar-fill { position: absolute; inset: 0 auto 0 0; background: #557083; }

@@ -88,6 +88,11 @@ export class Worker {
     return this.store.redact(error instanceof Error ? error.message : "Unexpected error");
   }
 
+  private failureReason(transfer: RemoteTransfer): string | null {
+    return transfer.status === "failed" ?
+      this.store.redact(transfer.error?.trim() || "slskd reported failure without a detailed reason") : null;
+  }
+
   private async startPending(): Promise<void> {
     const active = this.store.get<{ count: number }>("SELECT COUNT(*) AS count FROM requests WHERE status='searching'")?.count ?? 0;
     const slots = Math.max(0, this.config.SEARCH_CONCURRENCY - active);
@@ -290,18 +295,20 @@ export class Worker {
       if (remote && (remote.username !== item.username || remote.path !== item.path)) continue;
       if (remote) {
         const changed = item.status !== remote.status;
+        const reason = this.failureReason(remote);
         const progress = Math.round(100 * Math.min(1, remote.transferred / Math.max(1, item.size)));
-        this.store.run(`UPDATE transfers SET status=?,slskd_id=?,transferred=?,progress=?,error=NULL,updated_at=?,
+        this.store.run(`UPDATE transfers SET status=?,slskd_id=?,transferred=?,progress=?,error=?,updated_at=?,
           stat_epoch=CASE WHEN ?='completed' THEN (SELECT epoch FROM download_stats WHERE id=1) ELSE stat_epoch END,
           hidden_from_downloads=CASE WHEN status<>? THEN 0 ELSE hidden_from_downloads END WHERE id=?`,
-          remote.status, remote.id, remote.transferred, progress, new Date().toISOString(), remote.status, remote.status, item.id);
+          remote.status, remote.id, remote.transferred, progress, reason, new Date().toISOString(), remote.status, remote.status, item.id);
         const request = this.store.get<MusicRequest>("SELECT * FROM requests WHERE id=?", item.request_id);
         if (["ready", "queueing", "uncertain"].includes(item.status))
           this.store.event("info", "recovery", "transfer_found",
             `Existing slskd transfer found for ${item.path}; no duplicate enqueue`,
             { batchId: request?.batch_id, requestId: item.request_id, transferId: item.id });
-        if (changed && request) this.store.event(remote.status === "completed" ? "success" : remote.status === "failed" ? "error" : "info",
-          "transfer", remote.status, `${item.path}: ${remote.status}`,
+        if ((changed || remote.status === "failed" && item.error !== reason) && request)
+          this.store.event(remote.status === "completed" ? "success" : remote.status === "failed" ? "error" : "info",
+          "transfer", remote.status, `${item.path}: ${remote.status}${reason ? ` · ${reason}` : ""}`,
           { batchId: request.batch_id, requestId: item.request_id, folderJobId: item.folder_job_id ?? undefined, transferId: item.id });
         else if (Math.floor(progress / 10) > Math.floor(item.progress / 10) && request)
           this.store.event("info", "transfer", "progress", `${item.path}: ${progress}%`,
@@ -333,10 +340,13 @@ export class Worker {
       const existing = byBatch.get(item.queue_id ?? item.id) ??
         (item.retries || (samePath && ["failed", "cancelled"].includes(samePath.status)) ? undefined : samePath);
       if (existing) {
-        this.store.run(`UPDATE transfers SET status=?,slskd_id=?,transferred=?,updated_at=?,
+        const reason = this.failureReason(existing);
+        this.store.run(`UPDATE transfers SET status=?,slskd_id=?,transferred=?,error=?,updated_at=?,
           stat_epoch=CASE WHEN ?='completed' THEN (SELECT epoch FROM download_stats WHERE id=1) ELSE stat_epoch END WHERE id=?`,
-          existing.status, existing.id, existing.transferred, new Date().toISOString(), existing.status, item.id);
+          existing.status, existing.id, existing.transferred, reason, new Date().toISOString(), existing.status, item.id);
         this.store.event("info", "recovery", "transfer_found", `Existing slskd transfer found for ${item.path}; no duplicate enqueue`,
+          { requestId: item.request_id, transferId: item.id });
+        if (reason) this.store.event("error", "transfer", "failed", `${item.path}: failed · ${reason}`,
           { requestId: item.request_id, transferId: item.id });
         continue;
       }

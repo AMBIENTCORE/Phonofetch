@@ -37,7 +37,7 @@ const transfer = z.object({
   id: z.string().min(1), batchId: z.string().nullable().optional(),
   filename: z.string().min(1), username: z.string().min(1), size: finiteSize,
   bytesTransferred: z.number().nonnegative().default(0),
-  state: z.string(), removed: z.boolean().optional()
+  state: z.string(), exception: z.string().nullable().optional(), removed: z.boolean().optional()
 });
 const userTransfers = z.array(z.object({
   username: z.string(), directories: z.array(z.object({ directory: z.string(), files: z.array(transfer) }))
@@ -281,8 +281,12 @@ export class SlskdAdapter implements SlskdPort {
         /Cancelled|Canceled/i.test(item.state) ? "cancelled" :
           /Completed|Failed|TimedOut|Rejected/i.test(item.state) ? "failed" :
             /InProgress|Downloading|Initializing/i.test(item.state) ? "active" : "queued";
+      const error = status === "failed" ? item.exception?.trim() ||
+        (/\bTimedOut|Rejected\b/i.test(item.state) ?
+          `slskd reported ${item.state} without a detailed reason` :
+          "slskd reported failure without a detailed reason") : null;
       result.push({ id: item.id, batchId: item.batchId ?? null, username: item.username || user.username,
-        path: item.filename, size: item.size, transferred: Math.min(item.bytesTransferred, item.size), status });
+        path: item.filename, size: item.size, transferred: Math.min(item.bytesTransferred, item.size), status, error });
     }
     return result;
   }

@@ -8,6 +8,8 @@ Search directly from the Dashboard, or use the Search tab for multiple queries a
 
 The Dashboard, Downloads and Activity Log have filterable tables with clickable sort headers; track-result tables sort the same way. Downloads also has an optional peer/folder grouping view.
 
+Failed downloads display the reason reported by slskd when available. If no detail is reported, inspect that transfer in slskd.
+
 ## Screenshots
 
 **Search:** see each peer's full folder path and match score, then inspect or filter files before downloading.

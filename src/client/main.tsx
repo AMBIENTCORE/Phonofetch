@@ -1055,7 +1055,7 @@ function DownloadTable({ items, action, busy, sort, onSort }: { items: DownloadI
     <td data-label="File / path"><strong title={item.path}>{basename(item.path)}</strong>
       <small title={item.path}>{parentDirectory(item.path)}</small>
       <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>Search #{item.batch_number}</a></small>
-      {item.error && <small className="warn">{item.error}</small>}</td>
+      <TransferFailure item={item} /></td>
     <td data-label="Peer">{item.username}</td>
     <td data-label="Status"><TransferProgress item={item} /></td>
     <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
@@ -1075,13 +1075,19 @@ function TransferProgress({ item }: { item: DownloadItem }): React.ReactElement 
   </div>;
 }
 
+function TransferFailure({ item }: { item: DownloadItem }): React.ReactElement | null {
+  const reason = item.error?.trim() ||
+    (item.status === "failed" ? "Reason unavailable in Phonofetch; check the transfer in slskd." : null);
+  return reason ? <small className="warn">{reason}</small> : null;
+}
+
 function DownloadRow({ item, action, busy }: { item: DownloadItem;
   action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
   return <div className="download-row">
     <div className="download-file"><strong title={item.path}>{basename(item.path)}</strong>
       <small title={item.query_text}><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>
         Search #{item.batch_number}</a></small>
-      {item.error && <small className="warn">{item.error}</small>}</div>
+      <TransferFailure item={item} /></div>
     <TransferProgress item={item} />
     <span className="download-size">{bytes(item.transferred)} / {bytes(item.size)}</span>
     <span className="download-actions"><TransferActions transfer={item} action={action} busy={busy} /></span>
