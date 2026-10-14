@@ -299,6 +299,31 @@ describe("authenticated mixed-batch workflow", () => {
     expect(port.enqueue).toHaveBeenCalledTimes(extras.length);
   });
 
+  it("queues every selectable file including non-audio extras when downloading all", async () => {
+    const { app, worker, port, folderFiles } = setup();
+    folderFiles.push(remote("alice\\Burial\\Untrue\\playlist.m3u"),
+      remote("alice\\Burial\\Untrue\\notes.nfo"));
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial Untrue", defaultType: "search", mode: "review",
+      entries: [{ original: "Burial Untrue", queryText: "Burial Untrue", type: "search",
+        seedKind: "track_seed", quality: "any" }]
+    });
+    expect(created.status).toBe(201);
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const inspected = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(inspected.status).toBe(200);
+    expect(inspected.body).toMatchObject({ eligible_count: 6, excluded_count: 0 });
+    const paths = inspected.body.files.map((file: { path: string }) => file.path);
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: inspected.body.id, selectedPaths: paths })).status).toBe(202);
+    await worker.runOnce();
+    expect(vi.mocked(port.enqueue).mock.calls.map(([, file]) => file.path)).toEqual(expect.arrayContaining(paths));
+    expect(port.enqueue).toHaveBeenCalledTimes(paths.length);
+  });
+
   it("bounds very large folder inspections and still queues an individual search hit", async () => {
     const { app, worker, store, port, folderFiles } = setup();
     folderFiles.push(...Array.from({ length: 997 }, (_, index) =>

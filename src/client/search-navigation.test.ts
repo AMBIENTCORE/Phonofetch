@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { searchDraftHash, searchDraftQuery } from "./search-navigation";
+import { searchDraftQuery } from "./search-navigation";
 
-describe("dashboard search navigation", () => {
-  it("carries a query with URL-reserved characters to the Search form", () => {
+describe("search draft deep links", () => {
+  it("reads a query with URL-reserved characters from an existing Search form link", () => {
     const query = "Björk & Burial #1? live";
-    expect(searchDraftQuery(searchDraftHash(query))).toBe(query);
-    expect(searchDraftHash(query).startsWith("#/new?query=")).toBe(true);
+    expect(searchDraftQuery(`#/new?${new URLSearchParams({ query })}`)).toBe(query);
   });
 
   it("opens a blank Search form for existing links and missing query parameters", () => {

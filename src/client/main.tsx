@@ -6,7 +6,7 @@ import { readApiResponse } from "./api-response";
 import { audioDetails, fileFormat } from "./audio-details";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
-import { searchDraftHash, searchDraftQuery } from "./search-navigation";
+import { searchDraftQuery } from "./search-navigation";
 import "./compact.css";
 
 let csrf = "";
@@ -19,6 +19,21 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return readApiResponse<T>(response);
 }
 const send = <T,>(path: string, body: object = {}): Promise<T> => api<T>(path, { method: "POST", body: JSON.stringify(body) });
+async function createSearch(input: string, automaticType?: "track" | "album_folder", automaticQuality: Quality = "mp3_320"): Promise<string> {
+  const type: RequestType = automaticType ?? "search";
+  const seedKind: SeedKind = automaticType === "album_folder" ? "album_title" : "track_seed";
+  const entries = parseLines(input, type, automaticType ? automaticQuality : "any").map(row => ({ ...row, seedKind }));
+  if (input.length > 32768) throw new Error("Search input must be 32 KiB or less.");
+  if (!entries.length) throw new Error("Enter at least one query.");
+  if (entries.length > 100) throw new Error("A search can contain at most 100 queries.");
+  const invalid = entries.findIndex(row => row.error || row.duplicate);
+  if (invalid !== -1) throw new Error(`Query ${invalid + 1}: ${entries[invalid]!.error ??
+    "Duplicate text. Remove or edit the repeated line."}`);
+  const result = await send<{ id: string }>("/batches", {
+    originalInput: input, defaultType: type, mode: automaticType ? "automatic" : "review", entries
+  });
+  return result.id;
+}
 const time = (value: string): string => new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/Lisbon", dateStyle: "short", timeStyle: "medium"
 }).format(new Date(value));
@@ -131,7 +146,7 @@ function App(): React.ReactElement {
   return <div className="shell">
     <header><a className="brand" href="#/"><img className="brand-symbol" src="/phonofetch-mark.svg" alt="" /> Phonofetch</a><nav aria-label="Main navigation">
       <a className={page === "#/" ? "current" : ""} href="#/"><NavIcon name="dashboard" /><span>Dashboard</span></a>
-      <a className={searchPage ? "current" : searchPath ? "mobile-current" : ""} href="#/new">
+      <a className={searchPage || searchPath ? "current" : ""} href="#/new">
         <NavIcon name="search" /><span>Search</span></a>
       <a className={page === "#/downloads" ? "current" : ""} href="#/downloads"><NavIcon name="downloads" /><span>Downloads</span></a>
       <a className={page === "#/activity" ? "current" : ""} href="#/activity">
@@ -143,7 +158,7 @@ function App(): React.ReactElement {
         page === "#/downloads" ? <DownloadsPage reload={reload} action={action} busy={busy} /> :
         page === "#/activity" ? <ActivityPage reload={reload} /> :
           batchId ? <BatchPage id={batchId} page={page} reload={reload} action={action} busy={busy} /> :
-            <Dashboard reload={reload} />}
+            <Dashboard reload={reload} action={action} busy={busy} />}
     </main>
   </div>;
 }
@@ -162,7 +177,9 @@ function DownloadSource({ item }: { item: DownloadItem }): React.ReactElement {
     Search #{item.batch_number} · {item.query_text}</a> · {time(item.updated_at)}</small>;
 }
 
-function Dashboard({ reload }: { reload: number }): React.ReactElement {
+function Dashboard({ reload, action, busy }: {
+  reload: number; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
+}): React.ReactElement {
   const [data, setData] = useState<{ batches: Array<Batch & { total: number }>;
     downloads: DownloadsData; activity: Activity[]; slskd_status: SlskdConnectionState }>();
   const [error, setError] = useState("");
@@ -177,16 +194,17 @@ function Dashboard({ reload }: { reload: number }): React.ReactElement {
       event.preventDefault();
       const query = searchText.trim();
       if (!query) { setSearchError("Enter a search term."); return; }
-      location.hash = searchDraftHash(query);
+      if (busy) return;
+      void action(async () => { location.hash = `#/search/${await createSearch(query)}`; });
     }}>
       <label htmlFor="dashboard-search">New search</label>
       <div className="dashboard-search-row">
         <input id="dashboard-search" type="search" maxLength={256} required
           value={searchText} onChange={event => { setSearchText(event.target.value); setSearchError(""); }}
           placeholder="Artist, album, or track" />
-        <button type="submit">Search</button>
+        <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
       </div>
-      <small>Review your query in the Search tab before starting.</small>
+      <small>Starts searching and opens the results page.</small>
       {searchError && <small className="warn" role="alert">{searchError}</small>}
     </form>
     <DownloadMetrics stats={data?.downloads.stats} />
@@ -266,28 +284,11 @@ function NewBatch({ action, busy, initialInput }: {
   const [automaticQuality, setAutomaticQuality] = useState<Quality>("mp3_320");
   const [automatic, setAutomatic] = useState(false);
   const [automaticType, setAutomaticType] = useState<"track" | "album_folder">("track");
-  const [fileError, setFileError] = useState("");
   return <><div className="page-title"><div><h1>Search</h1><p>One query per line · up to 100 queries</p></div></div>
     <form className="panel form-panel" onSubmit={event => { event.preventDefault(); void action(async () => {
-      const type: RequestType = automatic ? automaticType : "search";
-      const seedKind: SeedKind = automatic && automaticType === "album_folder" ? "album_title" : "track_seed";
-      const entries = parseLines(input, type, automatic ? automaticQuality : "any").map(row => ({ ...row, seedKind }));
-      if (input.length > 32768) throw new Error("Search input must be 32 KiB or less.");
-      if (!entries.length) throw new Error("Enter at least one query.");
-      if (entries.length > 100) throw new Error("A search can contain at most 100 queries.");
-      const invalid = entries.findIndex(row => row.error || row.duplicate);
-      if (invalid !== -1) throw new Error(`Query ${invalid + 1}: ${entries[invalid]!.error ??
-        "Duplicate text. Remove or edit the repeated line."}`);
-      const result = await send<{ id: string }>("/batches", {
-        originalInput: input, defaultType: type, mode: automatic ? "automatic" : "review", entries
-      });
-      location.hash = `#/search/${result.id}`;
+      location.hash = `#/search/${await createSearch(input, automatic ? automaticType : undefined, automaticQuality)}`;
     }); }}>
       <label>Searches<textarea rows={4} maxLength={32768} value={input} onChange={event => setInput(event.target.value)} /></label>
-      <label className="upload">Text file (.txt)<input type="file" accept=".txt,text/plain" onChange={event => { const file = event.target.files?.[0]; if (!file) return;
-        if (file.size > 32768 || !file.name.toLowerCase().endsWith(".txt")) { setFileError("Use a .txt file up to 32 KiB."); return; }
-        void file.text().then(text => { setInput(current => [current, text].filter(Boolean).join("\n")); setFileError(""); }).catch(() => setFileError("Could not read the file."));
-      }} /></label><p role="alert">{fileError}</p>
       <details className="search-advanced"><summary>Automatic download (optional)</summary>
         <label className="check"><input type="checkbox" checked={automatic} onChange={event => setAutomatic(event.target.checked)} />
           Queue high-confidence matches without review</label>
@@ -746,8 +747,9 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, selected
   const expired = Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
   const canDownload = canQueue && !busy && !expired;
   const eligible = visibleFiles.filter(file => file.eligible);
+  const allEligible = preview.files.filter(file => file.eligible);
   const excluded = visibleFiles.filter(file => !file.eligible);
-  const selectedFiles = preview.files.filter(file => file.eligible && selected.has(file.path));
+  const selectedFiles = allEligible.filter(file => selected.has(file.path));
   const visiblePaths = new Set(visibleFiles.map(file => file.path));
   const hiddenSelected = selectedFiles.filter(file => !visiblePaths.has(file.path)).length;
   const selectedBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
@@ -786,13 +788,18 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, selected
     {canQueue && <div className={`folder-actions${selectedFiles.length ? " has-selection" : ""}`}>
       <span className="mobile-selection-summary" aria-live="polite">{selectedFiles.length
         ? `${selectedFiles.length} selected · ${bytes(selectedBytes)}`
-        : `${eligible.length} available · ${bytes(visibleFiles.reduce((sum, file) => sum + file.size, 0))}`}</span>
+        : `${allEligible.length} available · ${bytes(allEligible.reduce((sum, file) => sum + file.size, 0))}`}</span>
       {selected.size > 0 && <button className="secondary" disabled={!canDownload}
         onClick={() => onSelectionChange(new Set())}>Clear selection</button>}
-      <button disabled={!canDownload || (selected.size > 0 ? !selectedFiles.length : !eligible.length)}
-        onClick={() => confirmPreview(selected.size ? selectedPaths : eligible.map(file => file.path))}>
-        {selected.size ? `Download selected (${selectedFiles.length}, ${bytes(selectedBytes)})` : `Download all (${eligible.length})`}
+      <button className={selected.size > 0 ? "secondary" : "folder-download-primary"}
+        disabled={!canDownload || !allEligible.length}
+        onClick={() => confirmPreview(allEligible.map(file => file.path))}>
+        Download all ({allEligible.length})
       </button>
+      {selected.size > 0 && <button className="folder-download-primary" disabled={!canDownload || !selectedFiles.length}
+        onClick={() => confirmPreview(selectedPaths)}>Download selected ({selectedFiles.length}, {bytes(selectedBytes)})</button>}
+      {filterActive && allEligible.length > eligible.length &&
+        <small className="folder-actions-note">Download all includes files hidden by this filter.</small>}
     </div>}
     {menu && canDownload && <ContextMenu x={menu.x} y={menu.y} label={`Download selected (${selectedFiles.length})`}
       onDownload={() => confirmPreview(selectedPaths)} onClose={() => setMenu(null)} />}
