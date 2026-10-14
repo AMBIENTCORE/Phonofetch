@@ -6,6 +6,8 @@ Phonofetch is a self-hosted Soulseek search and download interface for an **exis
 
 Search directly from the Dashboard, or use the Search tab for multiple queries and optional automatic downloads. Manual searches can queue files from several folders; already queued files cannot be selected again. In an inspected folder, **Download all** includes selectable audio and non-audio files; **Download selected** queues only the checked files.
 
+The Dashboard and Activity Log use filterable tables; Activity can be sorted by date, severity or category. Downloads keeps its peer/folder tree, with sorting by update date or file size before loading more entries.
+
 ## Screenshots
 
 **Search:** see each peer's full folder path and match score, then inspect or filter files before downloading.

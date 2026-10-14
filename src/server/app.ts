@@ -50,14 +50,16 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
         (SELECT query_text FROM requests WHERE batch_id=b.id ORDER BY position,created_at,id LIMIT 1) AS first_query
         FROM batches b LEFT JOIN requests r ON r.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100`)
       .map(batch => ({ ...batch, name: batchName(batch.number, batch.first_query ?? "", batch.total) }));
-    res.json({ batches, downloads: store.downloads(5, 5), slskd_status: store.slskdStatus(), activity: store.activity({ limit: 8 }) });
+    res.json({ batches, downloads: store.downloads(20, 20), slskd_status: store.slskdStatus(),
+      activity: store.activity({ limit: 40, hideFileDetails: true }) });
   });
   app.get("/api/downloads", (req, res) => {
-    const { activeLimit, finishedLimit } = z.object({
+    const { activeLimit, finishedLimit, sort } = z.object({
       activeLimit: z.coerce.number().int().min(1).max(25000).default(50),
-      finishedLimit: z.coerce.number().int().min(1).max(25000).default(50)
+      finishedLimit: z.coerce.number().int().min(1).max(25000).default(50),
+      sort: z.enum(["newest", "oldest", "largest", "smallest"]).default("newest")
     }).parse(req.query);
-    res.json(store.downloads(activeLimit, finishedLimit));
+    res.json(store.downloads(activeLimit, finishedLimit, sort));
   });
   app.post("/api/downloads/clear", (_, res) => {
     res.json({ cleared: store.clearFinishedDownloads() });
@@ -223,8 +225,13 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
       batchId: uuid.optional(), requestId: uuid.optional(),
       search: z.string().max(120).optional(),
       cursor: z.coerce.number().int().positive().optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional()
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      order: z.enum(["asc", "desc"]).optional(),
+      sort: z.enum(["date", "severity", "category"]).optional()
     }).parse(req.query);
+    if (filters.cursor && filters.sort && filters.sort !== "date" &&
+      !store.get("SELECT id FROM activity WHERE id=?", filters.cursor))
+      throw new ApiError(400, "Activity cursor not found");
     res.json(store.activity(filters));
   });
   app.use("/api", (_, res) => { res.status(404).json({ error: "API route not found" }); });

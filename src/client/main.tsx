@@ -7,6 +7,7 @@ import { audioDetails, fileFormat } from "./audio-details";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import { searchDraftQuery } from "./search-navigation";
+import type { DownloadSort } from "../server/db";
 import { canAppendManualSearch, canInspectFolder, canQueueSearchHits, remoteFileKey } from "../shared/search-selection";
 import "./compact.css";
 
@@ -42,6 +43,8 @@ const bytes = (value: number): string => value < 1024 ? `${value} B` :
   value < 1048576 ? `${(value / 1024).toFixed(1)} KiB` :
     value < 1073741824 ? `${(value / 1048576).toFixed(1)} MiB` : `${(value / 1073741824).toFixed(2)} GiB`;
 const basename = (path: string): string => path.split(/[\\/]/).pop() ?? path;
+const matchesText = (text: string, ...values: Array<string | number>): boolean =>
+  values.some(value => String(value).toLocaleLowerCase().includes(text.trim().toLocaleLowerCase()));
 
 function Collapsible({ children, initiallyOpen, className }: {
   children: React.ReactNode; initiallyOpen: boolean; className?: string;
@@ -173,11 +176,6 @@ function DownloadMetrics({ stats }: { stats?: DownloadStats }): React.ReactEleme
     <div className="metric" key={metric.label}><strong>{metric.value}</strong><span>{metric.label}</span></div>)}</div>;
 }
 
-function DownloadSource({ item }: { item: DownloadItem }): React.ReactElement {
-  return <small className="download-source"><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>
-    Search #{item.batch_number} · {item.query_text}</a> · {time(item.updated_at)}</small>;
-}
-
 function Dashboard({ reload, action, busy }: {
   reload: number; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
 }): React.ReactElement {
@@ -186,8 +184,20 @@ function Dashboard({ reload, action, busy }: {
   const [error, setError] = useState("");
   const [searchText, setSearchText] = useState("");
   const [searchError, setSearchError] = useState("");
+  const [searchFilter, setSearchFilter] = useState("");
+  const [downloadFilter, setDownloadFilter] = useState("");
+  const [activityFilter, setActivityFilter] = useState("");
+  const [searchLimit, setSearchLimit] = useState(8);
+  const [downloadLimit, setDownloadLimit] = useState(8);
+  const [activityLimit, setActivityLimit] = useState(8);
   useEffect(() => { api<typeof data>("/dashboard").then(setData).catch(err => setError(String(err))); }, [reload]);
-  const recentDownloads = [...(data?.downloads.active ?? []), ...(data?.downloads.finished ?? [])].slice(0, 5);
+  const recentDownloads = [...(data?.downloads.active ?? []), ...(data?.downloads.finished ?? [])]
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id))
+    .filter(item => matchesText(downloadFilter, item.path, item.username, item.status, item.query_text));
+  const recentSearches = (data?.batches ?? []).filter(batch =>
+    matchesText(searchFilter, batch.name, batch.original_input));
+  const recentActivity = (data?.activity ?? []).filter(event =>
+    matchesText(activityFilter, event.message, event.category, event.severity, event.event_type));
   return <><div className="page-title"><div><h1>Dashboard</h1><p>Downloads and recent searches.</p></div></div>
     {data?.slskd_status === "unavailable" && <p role="status" className="service-warning">slskd unavailable. Searches stay pending until it reconnects. <a href="#/activity">View Activity Log</a></p>}
     <p role="alert">{error}</p>
@@ -209,18 +219,46 @@ function Dashboard({ reload, action, busy }: {
       {searchError && <small className="warn" role="alert">{searchError}</small>}
     </form>
     <DownloadMetrics stats={data?.downloads.stats} />
-    <section className="panel"><div className="panel-heading"><h2>Downloads</h2><a href="#/downloads">View all →</a></div>
-      {!recentDownloads.length ? <p className="empty">No downloads yet.</p> :
-        recentDownloads.map(item => <div className="download-brief" key={item.id}>
-          <span><strong>{basename(item.path)}</strong><DownloadSource item={item} /></span>
-          <small>{item.status} · {bytes(item.transferred)} / {bytes(item.size)}</small>
-        </div>)}</section>
-    <div className="columns"><section className="panel history-panel"><div className="panel-heading"><h2>Recent searches</h2><a href="#/new">New search →</a></div>
-      {!data?.batches.length ? <p className="empty">No searches yet.</p> :
-        data.batches.map(batch => <a className="batch-link" key={batch.id} href={`#/search/${batch.id}`}>
-          <span className="batch-copy"><strong title={batch.name}>{batch.name}</strong><small>{time(batch.created_at)}</small></span></a>)}</section>
-      <section className="panel"><div className="panel-heading"><h2>Recent activity</h2><a href="#/activity">View all →</a></div>
-        <ActivityList events={data?.activity ?? []} /></section></div></>;
+    <section className="panel table-panel history-panel"><div className="panel-heading"><h2>Recent searches</h2><a href="#/new">New search →</a></div>
+      <label className="table-filter">Filter recent searches<input type="search" value={searchFilter}
+        onChange={event => { setSearchFilter(event.target.value); setSearchLimit(8); }} placeholder="Artist, album, or query" /></label>
+      <small>{recentSearches.length} in the latest {data?.batches.length ?? 0} searches</small>
+      {recentSearches.length ? <div className="table-scroll"><table className="data-table"><thead><tr>
+        <th scope="col">Search</th><th scope="col">Queries</th><th scope="col">Created</th>
+      </tr></thead><tbody>{recentSearches.slice(0, searchLimit).map(batch => <tr key={batch.id}>
+        <td data-label="Search"><a href={`#/search/${batch.id}`} title={batch.name}>{batch.name}</a></td>
+        <td data-label="Queries">{batch.total}</td><td data-label="Created"><time dateTime={batch.created_at}>{time(batch.created_at)}</time></td>
+      </tr>)}</tbody></table></div> : <p className="empty">{data ? "No matching searches." : "Loading searches…"}</p>}
+      {recentSearches.length > searchLimit && <button className="secondary table-more"
+        onClick={() => setSearchLimit(limit => limit + 8)}>Show more searches</button>}
+    </section>
+    <section className="panel table-panel"><div className="panel-heading"><h2>Recent downloads</h2><a href="#/downloads">View all →</a></div>
+      <label className="table-filter">Filter recent downloads<input type="search" value={downloadFilter}
+        onChange={event => { setDownloadFilter(event.target.value); setDownloadLimit(8); }} placeholder="File, peer, or status" /></label>
+      <small>{recentDownloads.length} in the latest {data ? data.downloads.active.length + data.downloads.finished.length : 0} transfers</small>
+      {recentDownloads.length ? <div className="table-scroll"><table className="data-table"><thead><tr>
+        <th scope="col">File</th><th scope="col">Peer</th><th scope="col">Status</th>
+        <th scope="col">Size</th><th scope="col">Updated</th>
+      </tr></thead><tbody>{recentDownloads.slice(0, downloadLimit).map(item => <tr key={item.id}>
+        <td data-label="File"><strong title={item.path}>{basename(item.path)}</strong><small><a
+          href={`#/search/${item.batch_id}?request=${item.request_id}`}>Search #{item.batch_number}</a></small></td>
+        <td data-label="Peer">{item.username}</td><td data-label="Status">{item.status.replace("_", " ")}</td>
+        <td data-label="Size">{bytes(item.size)}</td>
+        <td data-label="Updated"><time dateTime={item.updated_at}>{time(item.updated_at)}</time></td>
+      </tr>)}</tbody></table></div> : <p className="empty">{data ? "No matching downloads." : "Loading downloads…"}</p>}
+      {recentDownloads.length > downloadLimit && <button className="secondary table-more"
+        onClick={() => setDownloadLimit(limit => limit + 8)}>Show more downloads</button>}
+    </section>
+    <section className="panel table-panel"><div className="panel-heading"><h2>Recent activity</h2><a href="#/activity">View all →</a></div>
+      <label className="table-filter">Filter recent activity<input type="search" value={activityFilter}
+        onChange={event => { setActivityFilter(event.target.value); setActivityLimit(8); }}
+        placeholder="Message, severity, or category" /></label>
+      <small>{recentActivity.length} in the latest {data?.activity.length ?? 0} events</small>
+      <ActivityTable events={recentActivity.slice(0, activityLimit)}
+        emptyMessage={data ? "No matching activity." : "Loading activity…"} />
+      {recentActivity.length > activityLimit && <button className="secondary table-more"
+        onClick={() => setActivityLimit(limit => limit + 8)}>Show more activity</button>}
+    </section></>;
 }
 
 function DownloadsPage({ reload, action, busy }: {
@@ -231,8 +269,14 @@ function DownloadsPage({ reload, action, busy }: {
   const [error, setError] = useState("");
   const [activeLimit, setActiveLimit] = useState(50);
   const [finishedLimit, setFinishedLimit] = useState(50);
+  const [sort, setSort] = useState<DownloadSort>("newest");
+  const [filterText, setFilterText] = useState("");
   const [mobileView, setMobileView] = useState<"active" | "finished" | null>(null);
   const selectedView = mobileView ?? (data?.active_total === 0 && data.finished_total > 0 ? "finished" : "active");
+  const matches = (item: DownloadItem) => matchesText(filterText, item.path, item.username, item.query_text,
+    item.status, bytes(item.size), time(item.updated_at));
+  const visibleActive = data?.active.filter(matches) ?? [];
+  const visibleFinished = data?.finished.filter(matches) ?? [];
   const clearFinished = () => {
     if (confirm("Hide completed, failed and cancelled downloads from the list? Files and statistics are kept."))
       void action(async () => { await send("/downloads/clear"); setFinishedLimit(50); });
@@ -242,15 +286,28 @@ function DownloadsPage({ reload, action, busy }: {
       void action(() => send("/downloads/stats/clear"));
   };
   useEffect(() => {
-    api<DownloadsData>(`/downloads?activeLimit=${activeLimit}&finishedLimit=${finishedLimit}`)
-      .then(setData).catch(err => setError(String(err)));
-  }, [reload, activeLimit, finishedLimit]);
+    let mounted = true;
+    api<DownloadsData>(`/downloads?activeLimit=${activeLimit}&finishedLimit=${finishedLimit}&sort=${sort}`)
+      .then(result => { if (mounted) { setData(result); setError(""); } })
+      .catch(err => { if (mounted) setError(String(err)); });
+    return () => { mounted = false; };
+  }, [reload, activeLimit, finishedLimit, sort]);
   return <><div className="page-title"><div><h1>Downloads</h1><p>slskd transfers; clearing this view never deletes downloaded files.</p></div></div>
     <p role="alert">{error}</p>
     <DownloadMetrics stats={data?.stats} />
     <div className="download-controls">
       <button className="secondary" disabled={busy || !data?.finished_total} onClick={clearFinished}>Clear finished list</button>
       <button className="secondary" disabled={busy} onClick={clearStats}>Clear statistics</button>
+    </div>
+    <div className="download-view-controls">
+      <label>Sort files<select value={sort} onChange={event => setSort(event.target.value as DownloadSort)}>
+        <option value="newest">Recently updated</option><option value="oldest">Oldest updated</option>
+        <option value="largest">Largest first</option><option value="smallest">Smallest first</option>
+      </select></label>
+      <label>Filter loaded downloads<input type="search" value={filterText}
+        onChange={event => setFilterText(event.target.value)} placeholder="File, peer, folder, status, or date" /></label>
+      <small>Files are sorted before loading; peer/folder groups follow their first file.
+        {filterText && " Filtering loaded entries; load more to include additional files."}</small>
     </div>
     <div className="mobile-download-tabs" role="group" aria-label="Download status">
       <button type="button" className={selectedView === "active" ? "current" : ""} aria-pressed={selectedView === "active"}
@@ -260,16 +317,19 @@ function DownloadsPage({ reload, action, busy }: {
     </div>
     <section className={`panel download-section${selectedView === "active" ? " mobile-selected" : ""}`}>
       <div className="panel-heading"><h2>Ongoing / needs attention</h2>
-      <small>{data?.active_total ?? 0} transfers{data?.stats.uncertain_count ? ` · ${data.stats.uncertain_count} uncertain` : ""}</small></div>
-      {!data?.active.length ? <p className="empty">No ongoing downloads.</p> :
-        <DownloadTree items={data.active} action={action} busy={busy} expandFolders />}
+      <small>{filterText && `${visibleActive.length} shown of `}{data?.active_total ?? 0} transfers
+        {data?.stats.uncertain_count ? ` · ${data.stats.uncertain_count} uncertain` : ""}</small></div>
+      {!visibleActive.length ? <p className="empty">{data ?
+        filterText ? "No matching loaded ongoing downloads." : "No ongoing downloads." : "Loading downloads…"}</p> :
+        <DownloadTree items={visibleActive} action={action} busy={busy} expandFolders />}
       {data && data.active_total > data.active.length && <button className="secondary" onClick={() => setActiveLimit(limit => limit + 50)}>Load more ongoing</button>}
     </section>
     <section className={`panel download-section${selectedView === "finished" ? " mobile-selected" : ""}`}>
       <div className="panel-heading"><h2>Finished</h2>
-      <small>{data?.finished_total ?? 0} in list</small></div>
-      {!data?.finished.length ? <p className="empty">No finished downloads in the list.</p> :
-        <DownloadTree items={data.finished} action={action} busy={busy} expandFolders={mobile && data.finished.length <= 10} />}
+      <small>{filterText && `${visibleFinished.length} shown of `}{data?.finished_total ?? 0} in list</small></div>
+      {!visibleFinished.length ? <p className="empty">{data ?
+        filterText ? "No matching loaded finished downloads." : "No finished downloads in the list." : "Loading downloads…"}</p> :
+        <DownloadTree items={visibleFinished} action={action} busy={busy} expandFolders={mobile && visibleFinished.length <= 10} />}
       {data && data.finished_total > data.finished.length && <button className="secondary" onClick={() => setFinishedLimit(limit => limit + 50)}>Load more finished</button>}
     </section>
     <details className="mobile-download-options"><summary>Manage downloads</summary>
@@ -922,6 +982,24 @@ function ActivityList({ events }: { events: Activity[] }): React.ReactElement {
         {event.batch_id && <> · <a href={`#/search/${event.batch_id}${event.request_id ? `?request=${event.request_id}` : ""}`}>{event.request_id ? "Query" : "Search"}</a></>}</small></div></div>)}</div>;
 }
 
+function ActivityTable({ events, emptyMessage }: { events: Activity[]; emptyMessage: string }): React.ReactElement {
+        if (!events.length) return <p className="empty">{emptyMessage}</p>;
+        return <div className="table-scroll"><table className="data-table activity-table"><thead><tr>
+          <th scope="col">Date</th><th scope="col">Severity</th><th scope="col">Category</th><th scope="col">Event</th>
+        </tr></thead><tbody>{events.map(event => <tr key={event.id}>
+          <td data-label="Date"><time dateTime={event.created_at}>{time(event.created_at)}</time></td>
+          <td data-label="Severity"><span className={`indicator ${event.severity}`} aria-hidden="true" />
+            {event.severity}</td>
+          <td data-label="Category">{event.category === "quality" ? "file result" :
+            event.category === "batch" ? "search" : event.category}</td>
+          <td data-label="Event"><strong>{event.message}</strong>
+            <small>{event.event_type === "folder_file_excluded" ? "blocked by old quality rule" :
+              event.event_type.replaceAll("_", " ")}
+              {event.batch_id && <> · <a href={`#/search/${event.batch_id}${event.request_id ? `?request=${event.request_id}` : ""}`}>
+                {event.request_id ? "Query" : "Search"}</a></>}</small></td>
+        </tr>)}</tbody></table></div>;
+}
+
 function ActivityPage({ reload }: { reload: number }): React.ReactElement {
   const [events, setEvents] = useState<Activity[]>([]);
   const [severity, setSeverity] = useState("");
@@ -930,31 +1008,52 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
   const [requestId, setRequestId] = useState("");
   const [search, setSearch] = useState("");
   const [older, setOlder] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(() => matchMedia("(min-width: 700px)").matches);
+  const [historyPaused, setHistoryPaused] = useState(false);
+  const [manualReload, setManualReload] = useState(0);
+  const [sort, setSort] = useState<"newest" | "oldest" | "severity" | "category">("newest");
+  const order = sort === "oldest" ? "asc" : "desc";
+  const sortColumn = sort === "severity" || sort === "category" ? sort : "date";
+  const queryKey = JSON.stringify([severity, category, batchId, requestId, search, sort]);
+  const currentQuery = useRef(queryKey);
+  currentQuery.current = queryKey;
   const activeFilters = [severity, category, batchId, requestId, search].filter(Boolean).length;
+  const resetView = () => { setHistoryPaused(false); setEvents([]); setOlder(false); };
   useEffect(() => {
-    const params = new URLSearchParams({ limit: "40" });
+    if (historyPaused) return;
+    const params = new URLSearchParams({ limit: "40", order, sort: sortColumn });
     if (severity) params.set("severity", severity);
     if (category) params.set("category", category);
     if (batchId) params.set("batchId", batchId);
     if (requestId) params.set("requestId", requestId);
     if (search) params.set("search", search);
-    api<Activity[]>(`/activity?${params}`).then(items => { setEvents(items); setOlder(items.length === 40); }).catch(err => setError(String(err)));
-  }, [reload, severity, category, batchId, requestId, search]);
+    let mounted = true;
+    api<Activity[]>(`/activity?${params}`).then(items => {
+      if (mounted) { setEvents(items); setOlder(items.length === 40); setError(""); }
+    }).catch(err => { if (mounted) setError(String(err)); });
+    return () => { mounted = false; };
+  }, [reload, manualReload, severity, category, batchId, requestId, search, order, sortColumn, historyPaused]);
   async function loadOlder(): Promise<void> {
+    if (loadingMore) return;
     const last = events.at(-1);
     if (!last) return;
+    const requestedQuery = queryKey;
+    setLoadingMore(true);
     try {
-      const params = new URLSearchParams({ limit: "40", cursor: String(last.id) });
+      const params = new URLSearchParams({ limit: "40", cursor: String(last.id), order, sort: sortColumn });
       if (severity) params.set("severity", severity);
       if (category) params.set("category", category);
       if (batchId) params.set("batchId", batchId);
       if (requestId) params.set("requestId", requestId);
       if (search) params.set("search", search);
       const items = await api<Activity[]>(`/activity?${params}`);
+      if (currentQuery.current !== requestedQuery) return;
       setEvents(existing => [...existing, ...items]); setOlder(items.length === 40);
-    } catch (err) { setError(String(err)); }
+      setHistoryPaused(true);
+    } catch (err) { if (currentQuery.current === requestedQuery) setError(String(err)); }
+    finally { setLoadingMore(false); }
   }
   const exportEvents = () => {
     const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json" });
@@ -973,14 +1072,31 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
       <details className="mobile-activity-options"><summary>More options</summary>
         <button className="secondary" onClick={exportEvents}>Export loaded events</button>
       </details>
-      {filtersOpen && <div className="filters" id="activity-filters"><label>Severity<select value={severity} onChange={event => setSeverity(event.target.value)}>
+      {filtersOpen && <div className="filters" id="activity-filters"><label>Severity<select value={severity} onChange={event => {
+        resetView(); setSeverity(event.target.value);
+      }}>
       <option value="">All</option>{["info", "success", "warning", "error"].map(value => <option key={value}>{value}</option>)}</select></label>
-      <label>Category<input placeholder="e.g. search" value={category} onChange={event => setCategory(event.target.value)} /></label>
-      <label>Search ID<input value={batchId} onChange={event => setBatchId(event.target.value)} /></label>
-      <label>Query ID<input value={requestId} onChange={event => setRequestId(event.target.value)} /></label>
-      <label>Search messages<input value={search} onChange={event => setSearch(event.target.value)} /></label></div>}
-      <p role="alert">{error}</p><ActivityList events={events} />
-      {older && <button className="secondary" onClick={() => void loadOlder()}>Load older events</button>}</section></>;
+      <label>Category<input placeholder="e.g. search" value={category} onChange={event => {
+        resetView(); setCategory(event.target.value);
+      }} /></label>
+      <label>Search ID<input value={batchId} onChange={event => { resetView(); setBatchId(event.target.value); }} /></label>
+      <label>Query ID<input value={requestId} onChange={event => { resetView(); setRequestId(event.target.value); }} /></label>
+      <label>Search messages<input value={search} onChange={event => {
+        resetView(); setSearch(event.target.value);
+      }} /></label></div>}
+      <div className="activity-sort-controls"><label className="table-sort">Sort activity<select value={sort} onChange={event => {
+        resetView(); setSort(event.target.value as typeof sort);
+      }}>
+        <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
+        <option value="severity">Severity (A–Z)</option><option value="category">Category (A–Z)</option>
+      </select></label><button className="secondary" onClick={() => {
+        resetView(); setManualReload(value => value + 1);
+      }}>Refresh events</button></div>
+      {historyPaused && <small>Live refresh is paused while viewing older events. Select Refresh events to resume.</small>}
+      <p role="alert">{error}</p><ActivityTable events={events} emptyMessage="No matching events." />
+      {older && <button className="secondary table-more" disabled={loadingMore} onClick={() => void loadOlder()}>
+        {loadingMore ? "Loading…" : sort === "oldest" ? "Load newer events" :
+          sort === "newest" ? "Load older events" : "Load more events"}</button>}</section></>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

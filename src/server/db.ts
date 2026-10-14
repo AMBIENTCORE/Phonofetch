@@ -11,6 +11,8 @@ export function batchName(number: number, search: string, count: number): string
   return `Search #${number}${search ? ` · ${search}` : ""}${count > 1 ? ` (+${count - 1} more)` : ""}`;
 }
 
+export type DownloadSort = "newest" | "oldest" | "largest" | "smallest";
+
 export class Store {
   readonly db: DatabaseSync;
   constructor(path: string, private readonly secrets: string[] = []) {
@@ -185,9 +187,12 @@ export class Store {
   }
 
   activity(filters: { severity?: string; category?: string; batchId?: string; requestId?: string;
-    search?: string; cursor?: number; limit?: number; hideFileDetails?: boolean } = {}): Activity[] {
+    search?: string; cursor?: number; limit?: number; hideFileDetails?: boolean;
+    order?: "asc" | "desc"; sort?: "date" | "severity" | "category" } = {}): Activity[] {
     const where: string[] = [];
     const args: SqlValue[] = [];
+    const order = filters.order === "asc" ? "ASC" : "DESC";
+    const sortColumn = filters.sort === "severity" || filters.sort === "category" ? filters.sort : null;
     for (const [column, value] of [["severity", filters.severity],
       ["batch_id", filters.batchId], ["request_id", filters.requestId]] as const) {
       if (value) { where.push(`${column}=?`); args.push(value); }
@@ -196,9 +201,18 @@ export class Store {
     else if (filters.category) { where.push("category=?"); args.push(filters.category); }
     if (filters.hideFileDetails) where.push("event_type NOT IN ('folder_file_excluded','candidate_excluded','candidate_ranked')");
     if (filters.search) { where.push("message LIKE ? ESCAPE '\\'"); args.push(`%${filters.search.replace(/[\\%_]/g, "\\$&")}%`); }
-    if (filters.cursor) { where.push("id<?"); args.push(filters.cursor); }
+    if (filters.cursor) {
+      if (sortColumn) {
+        const cursor = this.get<{ value: string }>(`SELECT ${sortColumn} AS value FROM activity WHERE id=?`, filters.cursor);
+        if (!cursor) throw new RangeError("Activity cursor not found");
+        where.push(`(${sortColumn} COLLATE NOCASE > ? COLLATE NOCASE OR
+          (${sortColumn} COLLATE NOCASE = ? COLLATE NOCASE AND id<?))`);
+        args.push(cursor.value, cursor.value, filters.cursor);
+      } else { where.push(`id${order === "ASC" ? ">" : "<"}?`); args.push(filters.cursor); }
+    }
+    const sorting = sortColumn ? `${sortColumn} COLLATE NOCASE ASC,id DESC` : `id ${order}`;
     return this.all<Activity>(`SELECT * FROM activity ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-      ORDER BY id DESC LIMIT ?`, ...args, Math.min(100, Math.max(1, filters.limit ?? 30)));
+      ORDER BY ${sorting} LIMIT ?`, ...args, Math.min(100, Math.max(1, filters.limit ?? 30)));
   }
 
   slskdStatus(): SlskdConnectionState {
@@ -218,14 +232,19 @@ export class Store {
     return stats;
   }
 
-  downloads(activeLimit: number, finishedLimit: number): DownloadsData {
+  downloads(activeLimit: number, finishedLimit: number, sort: DownloadSort = "newest"): DownloadsData {
     const from = `FROM transfers t JOIN requests r ON r.id=t.request_id JOIN batches b ON b.id=r.batch_id`;
     const fields = `SELECT t.*,r.batch_id,r.query_text,b.number AS batch_number ${from}`;
+    const order = {
+      newest: "t.updated_at DESC,t.id DESC", oldest: "t.updated_at ASC,t.id ASC",
+      largest: "t.size DESC,t.updated_at DESC,t.id DESC",
+      smallest: "t.size ASC,t.updated_at DESC,t.id DESC"
+    }[sort];
     const activeWhere = "t.hidden_from_downloads=0 AND t.status IN ('ready','queueing','queued','active','uncertain')";
     const finishedWhere = "t.hidden_from_downloads=0 AND t.status IN ('completed','failed','cancelled')";
     return {
-      active: this.all<DownloadItem>(`${fields} WHERE ${activeWhere} ORDER BY t.updated_at DESC,t.id DESC LIMIT ?`, activeLimit),
-      finished: this.all<DownloadItem>(`${fields} WHERE ${finishedWhere} ORDER BY t.updated_at DESC,t.id DESC LIMIT ?`, finishedLimit),
+      active: this.all<DownloadItem>(`${fields} WHERE ${activeWhere} ORDER BY ${order} LIMIT ?`, activeLimit),
+      finished: this.all<DownloadItem>(`${fields} WHERE ${finishedWhere} ORDER BY ${order} LIMIT ?`, finishedLimit),
       active_total: this.get<{ count: number }>(`SELECT COUNT(*) AS count ${from} WHERE ${activeWhere}`)?.count ?? 0,
       finished_total: this.get<{ count: number }>(`SELECT COUNT(*) AS count ${from} WHERE ${finishedWhere}`)?.count ?? 0,
       stats: this.downloadStats()

@@ -732,6 +732,39 @@ describe("authenticated mixed-batch workflow", () => {
     expect(port.enqueue).toHaveBeenCalledTimes(2);
   });
 
+  it("sorts downloads before pagination by update date and file size", async () => {
+    const { app, store, worker } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: entries[1]!.original, defaultType: "album_folder", mode: "review", entries: [entries[1]]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const preview = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: preview.body.id })).status).toBe(202);
+    const queued = store.all<{ id: string }>("SELECT id FROM transfers ORDER BY path");
+    expect(queued).toHaveLength(4);
+    for (const [index, transfer] of queued.entries()) {
+      const size = [20, 40, 10, 30][index];
+      if (size === undefined) throw new Error("Unexpected transfer count");
+      store.run("UPDATE transfers SET size=?,status='completed',updated_at=? WHERE id=?",
+        size, new Date(Date.UTC(2026, 9, 10 + index)).toISOString(), transfer.id);
+    }
+    const files = async (sort: string) => {
+      const response = await request(app).get(`/api/downloads?sort=${sort}&finishedLimit=2`).set(auth);
+      expect(response.status).toBe(200);
+      expect(response.body.finished_total).toBe(4);
+      return response.body.finished.map((file: { size: number }) => file.size);
+    };
+    expect(await files("largest")).toEqual([40, 30]);
+    expect(await files("smallest")).toEqual([10, 20]);
+    expect(await files("newest")).toEqual([30, 10]);
+    expect(await files("oldest")).toEqual([20, 40]);
+    expect((await request(app).get("/api/downloads?sort=arbitrary").set(auth)).status).toBe(400);
+  });
+
   it("restores a hidden failed download to the list when it is explicitly retried", async () => {
     const { app, worker, transfers } = setup();
     const auth = await login(app);
@@ -774,6 +807,7 @@ describe("authenticated mixed-batch workflow", () => {
     expect(detail.requests.every((item: MusicRequest) => item.status === "review")).toBe(true);
     expect((await request(app).get("/api/activity?category=search&limit=2").set(auth)).body).toHaveLength(2);
     expect((await request(app).get("/api/activity?search=Mixed").set(auth)).status).toBe(200);
+    expect((await request(app).get("/api/activity?sort=severity&cursor=99999999").set(auth)).status).toBe(400);
     const noCsrf = await request(app).post(`/api/requests/${detail.requests[0].id}/select`).set({ ...headers, Cookie: auth.Cookie })
       .send({ candidateId: detail.requests[0].candidates[0].id });
     expect(noCsrf.status).toBe(403);

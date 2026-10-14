@@ -27,6 +27,15 @@ describe("SQLite persistence and activity", () => {
     expect(b.activity({ hideFileDetails: true }).map(event => event.event_type))
       .not.toContain("folder_file_excluded");
     expect(b.activity({ cursor: b.activity()[0]?.id, limit: 1 })).toHaveLength(1);
+    const oldest = b.activity({ order: "asc", limit: 1 })[0]!;
+    expect(b.activity({ order: "asc", cursor: oldest.id, limit: 2 }).map(event => event.id))
+      .toEqual(b.activity({ order: "asc" }).slice(1, 3).map(event => event.id));
+    for (const sort of ["severity", "category"] as const) {
+      const all = b.activity({ sort }).map(event => event.id);
+      const first = b.activity({ sort, limit: 2 });
+      const rest = b.activity({ sort, cursor: first[1]!.id });
+      expect([...first, ...rest].map(event => event.id)).toEqual(all);
+    }
     b.close();
   });
   it("migrates existing v1 transfer and request tables atomically", () => {
