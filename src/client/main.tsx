@@ -732,15 +732,18 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
   const shownHits = !preview || !visibleFiles.length || previewExpired || previewErrors[folderId] ?
     visibleHits : searchHitsOutsidePreview(visibleHits, preview, selectedHits);
   const hitBytes = shownHits.reduce((total, file) => total + file.size, 0);
-  return <><div className="candidate">
+  const refreshFolder = () => void action(async () => {
+    await send<FolderPreview>(`/requests/${request.id}/preview`, { candidateId: candidate.id, recursive });
+    clearPreviewError(folderId);
+  });
+  return <>{(!preview || !visibleFiles.length) && <div className="candidate">
         <span><strong>{candidate.directory || "Shared files"}</strong><small title={candidate.explanation}>Match {Math.round(candidate.score * 100)}%</small></span>
-        {canInspect && candidate.directory && <button className="quiet" disabled={busy || inspecting.has(folderId)} onClick={() => void action(async () => {
-          await send<FolderPreview>(`/requests/${request.id}/preview`, { candidateId: candidate.id, recursive });
-          clearPreviewError(folderId);
-        })}>{inspecting.has(folderId) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}
-      </div>
+        {canInspect && candidate.directory && <button className="quiet" disabled={busy || inspecting.has(folderId)}
+          onClick={refreshFolder}>{inspecting.has(folderId) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}
+      </div>}
       {preview && visibleFiles.length > 0 && <Preview key={preview.id} preview={preview}
         visibleFiles={visibleFiles} filterActive={filterKey !== "all:"} busy={busy} canQueue={canInspect}
+        onRefresh={canInspect && candidate.directory ? refreshFolder : undefined} refreshing={inspecting.has(folderId)}
         queuedKeys={queuedKeys}
         selected={previewSelections.get(preview.id) ?? new Set<string>()}
         onSelectionChange={paths => onPreviewSelectionChange(preview.id, paths)}
@@ -770,7 +773,7 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
         </div>}
       {previewErrors[folderId] && <small role="alert" className="warn">Inspection failed: {previewErrors[folderId]}.
         {shownHits.some(file => searchHitSelectionReason(request, file) === null) &&
-          " Search hits above remain selectable."} Select Inspect to retry.</small>}
+          " Search hits above remain selectable."} Select {preview ? "Refresh" : "Inspect"} to retry.</small>}
     </>;
 }
 
@@ -913,9 +916,11 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue, 
   return <div className="folder-tree-scroll">{render(root)}</div>;
 }
 
-function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKeys, selected, onSelectionChange, confirmPreview }: {
+function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKeys, onRefresh, refreshing,
+  selected, onSelectionChange, confirmPreview }: {
   preview: FolderPreview; visibleFiles: PreviewFile[]; filterActive: boolean;
   queuedKeys: ReadonlySet<string>;
+  onRefresh?: () => void; refreshing: boolean;
   selected: ReadonlySet<string>; onSelectionChange: (paths: Set<string>) => void;
   busy: boolean; canQueue: boolean; confirmPreview: (paths?: string[]) => void;
 }): React.ReactElement {
@@ -929,6 +934,11 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKe
   const selectedFiles = allEligible.filter(file => selected.has(file.path));
   const visiblePaths = new Set(visibleFiles.map(file => file.path));
   const hiddenSelected = selectedFiles.filter(file => !visiblePaths.has(file.path)).length;
+  const queuedVisible = visibleFiles.filter(file => queuedKeys.has(remoteFileKey(file))).length;
+  const notes = [preview.recursive ? "Includes subfolders" : "",
+    excluded.length ? `${availableVisible.length} selectable · ${excluded.length} unavailable` : "",
+    queuedVisible ? `${queuedVisible} already queued` : "",
+    hiddenSelected ? `${hiddenSelected} selected outside this filter` : ""].filter(Boolean).join(" · ");
   const selectedBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
   const chooseFile = (path: string) => {
     const next = new Set(selected);
@@ -945,14 +955,15 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKe
   };
   const selectedPaths = selectedFiles.map(file => file.path);
   return <div className="preview folder-preview">
-    <div className="folder-summary"><span>{visibleFiles.length}{filterActive && ` of ${preview.files.length}`} file{visibleFiles.length === 1 ? "" : "s"}
-      {preview.recursive ? " incl. subfolders" : ""}
-      {excluded.length > 0 && ` · ${availableVisible.length} selectable · ${excluded.length} unavailable`}
-      {visibleFiles.some(file => queuedKeys.has(remoteFileKey(file))) &&
-        ` · ${visibleFiles.filter(file => queuedKeys.has(remoteFileKey(file))).length} already queued`}
-      {hiddenSelected > 0 && ` · ${hiddenSelected} selected outside this filter`}</span>
-      <strong>{bytes(visibleFiles.reduce((sum, file) => sum + file.size, 0))}
-        {filterActive && ` shown · ${bytes(preview.audio_bytes)} folder`}</strong></div>
+    <div className="folder-summary">
+      {onRefresh && <button className="quiet folder-refresh" disabled={busy || refreshing} onClick={onRefresh}>
+        {refreshing ? "Inspecting…" : "Refresh"}</button>}
+      <span className="folder-summary-total">{visibleFiles.length}{filterActive && ` of ${preview.files.length}`}
+        {" "}file{visibleFiles.length === 1 ? "" : "s"}{" · "}
+        <strong>{bytes(visibleFiles.reduce((sum, file) => sum + file.size, 0))}</strong>
+        {filterActive && ` shown · ${bytes(preview.audio_bytes)} folder`}</span>
+      {notes && <small className="folder-summary-notes">{notes}</small>}
+    </div>
     {eligible.length ? <>
       <div className="folder-tree-columns"><span>File</span><span>Type / bitrate</span><span>Size</span></div>
       <FolderTree preview={preview} files={eligible} selected={selected} onSelect={chooseFile}
