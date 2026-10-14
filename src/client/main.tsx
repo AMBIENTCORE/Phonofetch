@@ -617,7 +617,9 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
               {fileFormat(file.metadata, file.path)}</span><span className="folder-file-size">{bytes(file.size)}</span></div>;
           })}
         </div>}
-      {previewErrors[folderId] && <small role="alert" className="warn">Inspection failed: {previewErrors[folderId]}. Select Inspect to retry.</small>}
+      {previewErrors[folderId] && <small role="alert" className="warn">Inspection failed: {previewErrors[folderId]}.
+        {shownHits.some(file => searchHitSelectionReason(request, file) === null) &&
+          " Search hits above remain selectable."} Select Inspect to retry.</small>}
     </>;
 }
 

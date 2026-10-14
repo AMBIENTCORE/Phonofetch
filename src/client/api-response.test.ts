@@ -9,9 +9,13 @@ describe("API response parsing", () => {
       status: 401, headers: { "content-type": "application/problem+json" }
     });
     await expect(readApiResponse(denied)).rejects.toThrow("Sign in required");
+    const upstream = new Response(JSON.stringify({ error: "slskd browse timed out" }), {
+      status: 502, headers: { "content-type": "application/json" }
+    });
+    await expect(readApiResponse(upstream)).rejects.toThrow("slskd browse timed out");
   });
 
-  it("explains an HTML login or proxy response without showing its contents", async () => {
+  it("distinguishes an HTML login response from an upstream failure without showing its contents", async () => {
     const html = "<!DOCTYPE html><html><body>Access sign-in</body></html>";
     for (const status of [200, 502]) {
       const response = new Response(html, { status, headers: { "content-type": "text/html; charset=utf-8" } });
@@ -22,7 +26,13 @@ describe("API response parsing", () => {
         error = cause;
       }
       expect(error?.message).toContain(`HTML (HTTP ${status})`);
-      expect(error?.message).toContain("Cloudflare Access");
+      if (status === 502) {
+        expect(error?.message).toContain("proxy or upstream service failed");
+        expect(error?.message).toContain("NAS app logs");
+        expect(error?.message).not.toContain("sign in");
+      } else {
+        expect(error?.message).toContain("Cloudflare Access");
+      }
       expect(error?.message).not.toContain("DOCTYPE");
       expect(error?.message.endsWith(".")).toBe(false);
     }
