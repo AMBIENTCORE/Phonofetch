@@ -193,7 +193,7 @@ function SortHeading<Key extends string>({ label, column, sort, onSort }: {
   const current = sort.key === column;
   return <th scope="col" aria-sort={current ? sort.direction === "asc" ? "ascending" : "descending" : "none"}>
     <button className="sort-heading" type="button" onClick={() => onSort(column)}>
-      {label}<span aria-hidden="true">{current ? sort.direction === "asc" ? " ↑" : " ↓" : " ↕"}</span>
+      {label}{current && <span className="sort-arrow" aria-hidden="true">{sort.direction === "asc" ? "↑" : "↓"}</span>}
     </button>
   </th>;
 }
@@ -363,10 +363,11 @@ function DownloadsPage({ reload, action, busy }: {
     {view === "grouped" && <div className="grouped-sort-headers" role="group" aria-label="Sort grouped downloads">
       {([["file", "File / path"], ["peer", "Peer"], ["status", "Status"],
         ["size", "Size"], ["updated", "Updated"]] as const).map(([key, label]) =>
-        <button key={key} type="button" className={sort.key === key ? "current" : "secondary"}
+        <button key={key} type="button" className={`grouped-sort-heading${sort.key === key ? " current" : ""}`}
           aria-pressed={sort.key === key}
           onClick={() => setSort(current => toggleSort(current, key, "updated"))}>
-          {label} {sort.key === key ? sort.direction === "asc" ? "↑" : "↓" : "↕"}
+          {label}{sort.key === key &&
+            <span className="sort-arrow" aria-hidden="true">{sort.direction === "asc" ? "↑" : "↓"}</span>}
         </button>)}
     </div>}
     <div className="mobile-download-tabs" role="group" aria-label="Download status">
