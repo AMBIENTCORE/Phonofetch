@@ -267,7 +267,7 @@ function Dashboard({ reload, action, busy }: {
     </form>
     <DownloadMetrics stats={data?.downloads.stats} />
     <section className="panel table-panel history-panel"><div className="panel-heading"><h2>Recent searches</h2><a href="#/new">New search →</a></div>
-      <label className="table-filter">Filter recent searches<input type="search" value={searchFilter}
+      <label className="table-filter">Filter<input type="search" aria-label="Filter recent searches" value={searchFilter}
         onChange={event => { setSearchFilter(event.target.value); setSearchLimit(8); }} placeholder="Artist, album, or query" /></label>
       <small>{recentSearches.length} in the latest {data?.batches.length ?? 0} searches</small>
       {recentSearches.length ? <div className="table-scroll"><table className="data-table"><thead><tr>
@@ -285,7 +285,7 @@ function Dashboard({ reload, action, busy }: {
         onClick={() => setSearchLimit(limit => limit + 8)}>Show more searches</button>}
     </section>
     <section className="panel table-panel"><div className="panel-heading"><h2>Recent downloads</h2><a href="#/downloads">View all →</a></div>
-      <label className="table-filter">Filter recent downloads<input type="search" value={downloadFilter}
+      <label className="table-filter">Filter<input type="search" aria-label="Filter recent downloads" value={downloadFilter}
         onChange={event => { setDownloadFilter(event.target.value); setDownloadLimit(8); }} placeholder="File, peer, or status" /></label>
       <small>{recentDownloads.length} in the latest {data ? data.downloads.active.length + data.downloads.finished.length : 0} transfers</small>
       {recentDownloads.length ? <div className="table-scroll"><table className="data-table"><thead><tr>
@@ -316,7 +316,7 @@ function Dashboard({ reload, action, busy }: {
         onClick={() => setDownloadLimit(limit => limit + 8)}>Show more downloads</button>}
     </section>
     <section className="panel table-panel"><div className="panel-heading"><h2>Recent activity</h2><a href="#/activity">View all →</a></div>
-      <label className="table-filter">Filter recent activity<input type="search" value={activityFilter}
+      <label className="table-filter">Filter<input type="search" aria-label="Filter recent activity" value={activityFilter}
         onChange={event => { setActivityFilter(event.target.value); setActivityLimit(8); }}
         placeholder="Message, severity, or category" /></label>
       <small>{recentActivity.length} in the latest {data?.activity.length ?? 0} events</small>
@@ -373,7 +373,7 @@ function DownloadsPage({ reload, action, busy }: {
       <button className="secondary" disabled={busy} onClick={clearStats}>Clear statistics</button>
     </div>
     <div className="download-view-controls">
-      <label>Filter loaded downloads<input type="search" value={filterText}
+      <label>Filter<input type="search" aria-label="Filter loaded downloads" value={filterText}
         onChange={event => setFilterText(event.target.value)} placeholder="File, peer, folder, status, or date" /></label>
       <div className="download-view-tabs" role="group" aria-label="Download view">
         <button type="button" className={view === "table" ? "current" : "secondary"}
@@ -381,9 +381,8 @@ function DownloadsPage({ reload, action, busy }: {
         <button type="button" className={view === "grouped" ? "current" : "secondary"}
           aria-pressed={view === "grouped"} onClick={() => setView("grouped")}>Grouped</button>
       </div>
-      <small>Ongoing files start in queue order; finished files start newest first. Headings sort before loading more;
-        search, peer, and folder groups follow their first sorted file.
-        {filterText && " Filtering loaded entries; load more to include additional files."}</small>
+      {filterText && data && (data.active_total > data.active.length || data.finished_total > data.finished.length) &&
+        <small>Filtering loaded files; load more to include additional files.</small>}
     </div>
     <div className="mobile-download-tabs" role="group" aria-label="Download status">
       <button type="button" className={selectedView === "active" ? "current" : ""} aria-pressed={selectedView === "active"}
@@ -621,7 +620,7 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
           <button key={value} className={preset === value ? "current" : "secondary"} aria-pressed={preset === value}
             onClick={() => setPreset(value)}>{label}</button>)}
       </div>
-      <label>Filter files<input value={filterText} onChange={event => setFilterText(event.target.value)}
+      <label>Filter<input aria-label="Filter files" value={filterText} onChange={event => setFilterText(event.target.value)}
         placeholder="words -word minbr:320 iscbr" /></label>
       {parsedFilter.error && <small className="warn" role="alert">{parsedFilter.error}</small>}
       {preset === "mp3_320" && <small>Peer-reported 320 kbps MP3. Add iscbr to require confirmed CBR.</small>}
