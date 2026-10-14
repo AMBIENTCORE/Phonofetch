@@ -483,6 +483,8 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .download-table td { padding: 0 .3rem; border: 0; }
   .data-table td::before { display: block; margin-bottom: .12rem; color: var(--muted);
     content: attr(data-label); font-size: .76rem; font-weight: 600; }
+  .download-table td.download-actions::before,
+  .download-table td.download-actions:empty { display: none; }
   .data-table td time { white-space: normal; }
   .download-view-controls { grid-template-columns: 1fr; }
   .download-view-tabs { justify-content: stretch; }
