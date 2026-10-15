@@ -174,6 +174,8 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
   .download-table tbody td[data-label="Size"],
   .download-table tbody td[data-label="Queued"],
   .download-table tbody td[data-label="Updated"] { text-align: center; }
+  .download-table tbody tr[aria-label] td { vertical-align: middle; }
+  .download-table .download-actions button { min-height: 16px; padding: 0 .25rem; line-height: 1.2; }
 }
 .batch-progress { display: block; width: min(100%, 240px); height: 4px; margin-top: .35rem; border-radius: 4px; background: #353638; }
 .batch-progress span { display: block; height: 100%; border-radius: inherit; background: #bcbcbc; }
@@ -631,8 +633,9 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .download-section { display: none; }
   .download-section.mobile-selected { display: block; }
   .download-bar { height: 13px; }
-  .download-actions { grid-column: 2; text-align: right; }
-  .download-actions button, .download-folder-cancel { min-height: 44px; }
+  .download-actions { position: relative; grid-column: 2; height: 100%; text-align: right; }
+  .download-actions button { position: absolute; right: 0; bottom: -.5rem; min-height: 44px; }
+  .download-folder-cancel { min-height: 44px; }
   .mobile-download-options { display: block; margin: .65rem 0 1.5rem; }
   .mobile-download-options > summary { min-height: 48px; padding: .65rem .5rem; color: var(--muted); cursor: pointer; }
   .mobile-download-options button { width: 100%; margin: .3rem 0; }

@@ -18,18 +18,18 @@ Actions such as downloading selected files, cancelling transfers, and clearing l
 
 ## Screenshots
 
-**Search:** see each peer's full folder path and match score, then inspect or filter files before downloading.
+Current desktop and phone views with synthetic search and transfer data. Select a thumbnail to view it full size.
 
-![Phonofetch search results for Forest Drive West's Recursion EP](./docs/search-results-demo.png)
-
-**Downloads:** see transfers by peer and folder, with per-file status and controls.
-
-![Phonofetch downloads showing Forest Drive West and Ex-Terrestrial](./docs/downloads-demo.png)
-
-**Mobile:** folder drill-down, file selection and bottom navigation. These phone-width views use the music shown in the desktop screenshots.
+### Desktop
 <p>
-  <a href="./docs/mobile-search-demo.png"><img src="./docs/mobile-search-demo.png" width="280" alt="Mobile search results for Forest Drive West with MP3 and FLAC folders"></a>
-  <a href="./docs/mobile-downloads-demo.png"><img src="./docs/mobile-downloads-demo.png" width="280" alt="Mobile downloads showing completed Forest Drive West and Ex-Terrestrial tracks"></a>
+  <a href="./docs/search-results-demo.png"><img src="./docs/search-results-demo.png" width="480" alt="Desktop search results showing inspected FLAC and MP3 folders, file checkboxes and quality details"></a>
+  <a href="./docs/downloads-demo.png"><img src="./docs/downloads-demo.png" width="480" alt="Desktop downloads grouped by search, peer and folder, with progress, cancel controls and completed files"></a>
+</p>
+
+### Mobile
+<p>
+  <a href="./docs/mobile-search-demo.png"><img src="./docs/mobile-search-demo.png" width="280" alt="Phone search folder showing selected files and download controls"></a>
+  <a href="./docs/mobile-downloads-demo.png"><img src="./docs/mobile-downloads-demo.png" width="280" alt="Phone downloads showing active transfers, folder-level Cancel all and bottom navigation"></a>
 </p>
 
 ## Deploy
