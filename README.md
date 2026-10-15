@@ -12,6 +12,8 @@ Use **Cancel all** on a Downloads folder row to cancel its ongoing files from th
 
 Failed downloads display the reason reported by slskd when available. If no detail is reported, inspect that transfer in slskd.
 
+Actions such as downloading selected files, cancelling transfers, and clearing lists use compact confirmation dialogs. Successful requests show brief notices; errors remain visible in the page and Activity Log. Select a result's format/bitrate to open its peer-reported file details and copy the full path. The Activity Log also offers **Copy error**. If clipboard access is unavailable (for example, on an insecure LAN page), the text stays selectable for manual copying.
+
 ## Screenshots
 
 **Search:** see each peer's full folder path and match score, then inspect or filter files before downloading.

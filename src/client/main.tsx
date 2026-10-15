@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { Popover } from "@base-ui/react/popover";
 import type { Activity, Batch, BatchDetail, Candidate, DownloadItem, DownloadsData, DownloadStats, FolderPreview, PreviewFile, Quality, RemoteFile, RequestType, SeedKind, SlskdConnectionState, TransferItem } from "../shared/types";
 import { parentDirectory, parseLines } from "../server/matching";
 import { readApiResponse } from "./api-response";
 import { audioDetails, fileFormat } from "./audio-details";
 import { groupDownloadPeers, groupDownloads } from "./download-groups";
 import { autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
+import { CopyButton, InteractionProvider, notifySuccess, useConfirmation } from "./interaction-ui";
 import { observedRate, predictedProgress, type ProgressSample } from "./progress-estimate";
 import { matchesResult, parseResultFilter, type ResultPreset } from "./result-filter";
 import { searchDraftQuery } from "./search-navigation";
@@ -48,6 +50,32 @@ const bytes = (value: number): string => value < 1024 ? `${value} B` :
 const basename = (path: string): string => path.split(/[\\/]/).pop() ?? path;
 const matchesText = (text: string, ...values: Array<string | number>): boolean =>
   values.some(value => String(value).toLocaleLowerCase().includes(text.trim().toLocaleLowerCase()));
+
+function FileDetails({ file }: { file: RemoteFile }): React.ReactElement {
+  return <Popover.Root>
+    <Popover.Trigger className="file-details-trigger" aria-label={`Details for ${basename(file.path)}`}>
+      {fileFormat(file.metadata, file.path)}
+    </Popover.Trigger>
+    <Popover.Portal><Popover.Positioner side="bottom" align="start" sideOffset={6} className="ui-popover-positioner">
+      <Popover.Popup className="ui-file-popover">
+        <div className="ui-file-popover-heading"><Popover.Title>{basename(file.path)}</Popover.Title>
+          <Popover.Close className="quiet" aria-label="Close file details">Close</Popover.Close></div>
+        <dl>
+          <div><dt>Peer</dt><dd>{file.username}</dd></div>
+          <div><dt>Size</dt><dd>{bytes(file.size)}</dd></div>
+          <div><dt>Reported format</dt><dd>{audioDetails(file.metadata, file.path)}</dd></div>
+          {file.upload_speed !== undefined && <div><dt>Upload speed</dt><dd>{
+            file.upload_speed === null ? "Not reported" : `${bytes(file.upload_speed)}/s`}</dd></div>}
+          {file.free_slot !== undefined && <div><dt>Upload slot</dt><dd>{
+            file.free_slot === null ? "Not reported" : file.free_slot ? "Free" : "Busy"}</dd></div>}
+          {file.queue_length != null && <div><dt>Peer queue</dt><dd>{file.queue_length}</dd></div>}
+        </dl>
+        <div className="ui-file-path"><span>Full path</span><code>{file.path}</code>
+          <CopyButton value={file.path} /></div>
+      </Popover.Popup>
+    </Popover.Positioner></Popover.Portal>
+  </Popover.Root>;
+}
 
 function Collapsible({ children, initiallyOpen, className }: {
   children: React.ReactNode; initiallyOpen: boolean; className?: string;
@@ -330,6 +358,7 @@ function Dashboard({ reload, action, busy }: {
 function DownloadsPage({ reload, action, busy }: {
   reload: number; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
 }): React.ReactElement {
+  const requestConfirmation = useConfirmation();
   const [snapshot, setSnapshot] = useState<{ downloads: DownloadsData; receivedAt: number }>();
   const data = snapshot?.downloads;
   const [error, setError] = useState("");
@@ -345,12 +374,20 @@ function DownloadsPage({ reload, action, busy }: {
   const visibleActive = data?.active.filter(matches) ?? [];
   const visibleFinished = data?.finished.filter(matches) ?? [];
   const clearFinished = () => {
-    if (confirm("Hide completed, failed and cancelled downloads from the list? Files and statistics are kept."))
-      void action(async () => { await send("/downloads/clear"); setFinishedLimit(50); });
+    requestConfirmation({ title: "Clear finished list?",
+      description: "Hide completed, failed and cancelled entries. Downloaded files and statistics are kept.",
+      confirmLabel: "Clear list",
+      onConfirm: () => void action(async () => {
+        await send("/downloads/clear"); setFinishedLimit(50); notifySuccess("Finished list cleared");
+      }) });
   };
   const clearStats = () => {
-    if (confirm("Reset completed-file and downloaded-byte statistics? Download entries are kept."))
-      void action(() => send("/downloads/stats/clear"));
+    requestConfirmation({ title: "Clear statistics?",
+      description: "Reset completed-file and downloaded-byte totals. Download entries and files are kept.",
+      confirmLabel: "Clear statistics",
+      onConfirm: () => void action(async () => {
+        await send("/downloads/stats/clear"); notifySuccess("Download statistics reset");
+      }) });
   };
   useEffect(() => {
     let mounted = true;
@@ -497,6 +534,7 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   request: RequestDetail; singleQuery: boolean; action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean;
   inspecting: ReadonlySet<string>; previewErrors: Record<string, string>; clearPreviewError: (key: string) => void;
 }): React.ReactElement {
+  const requestConfirmation = useConfirmation();
   const [recursive, setRecursive] = useState(false);
   const [retryQuality, setRetryQuality] = useState<Quality>(request.quality);
   const [preset, setPreset] = useState<ResultPreset>("all");
@@ -577,10 +615,14 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
     if (!canSelectHits || !chosenHits.length) return;
     const count = chosenHits.length;
     const total = chosenHits.reduce((sum, candidate) => sum + candidate.size, 0);
-    if (confirm(`Download ${count} selected search hit${count === 1 ? "" : "s"} (${bytes(total)})?`))
-      void action(() => request.type === "track" ?
-        send(`/requests/${request.id}/select`, { candidateId: chosenHits[0]!.id }) :
-        send(`/requests/${request.id}/select-hits`, { candidateIds: chosenHits.map(candidate => candidate.id) }));
+    requestConfirmation({ title: `Download ${count} selected file${count === 1 ? "" : "s"}?`,
+      description: `${bytes(total)} from the selected search hits.`,
+      confirmLabel: "Download selected",
+      onConfirm: () => void action(async () => {
+        if (request.type === "track") await send(`/requests/${request.id}/select`, { candidateId: chosenHits[0]!.id });
+        else await send(`/requests/${request.id}/select-hits`, { candidateIds: chosenHits.map(candidate => candidate.id) });
+        notifySuccess(`${count} file${count === 1 ? "" : "s"} added to queue`);
+      }) });
   };
   return <section className={`panel request${chosenHits.length && canSelectHits ? " has-selection" : ""}`}
     id={`request-${request.id}`}><div className="panel-heading">
@@ -621,9 +663,12 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
         }<button className="secondary" disabled={busy} onClick={() => void action(() => send(`/requests/${request.id}/retry`,
           { quality: request.type === "search" ? "any" : retryQuality }))}>Search again (fast)</button>
         <button className="secondary" disabled={busy} onClick={() => {
-          if (!request.candidates.length || confirm("A longer search replaces these results. Continue?"))
-            void action(() => send(`/requests/${request.id}/retry`,
-              { quality: request.type === "search" ? "any" : retryQuality, longer: true }));
+          const retry = () => void action(() => send(`/requests/${request.id}/retry`,
+            { quality: request.type === "search" ? "any" : retryQuality, longer: true }));
+          if (!request.candidates.length) retry();
+          else requestConfirmation({ title: "Search longer?",
+            description: "A longer search replaces the current results for this query.",
+            confirmLabel: "Search longer", onConfirm: retry });
         }}>Search longer</button></div></details>}
     {request.type === "track" && request.candidates.length > 0 && <div>
       <div className="result-section-heading"><h3>Files ({visibleCandidates.length})</h3>
@@ -703,7 +748,7 @@ function FolderCandidateList({ peers, mobile, ...body }: FolderListProps): React
         </summary>
         <div className="mobile-folder-detail">
           {candidate.directory && <details className="mobile-folder-path"><summary>Full path</summary>
-            <small>{candidate.directory}</small></details>}
+            <small>{candidate.directory}</small><CopyButton value={candidate.directory} /></details>}
           <FolderCandidateBody {...body} candidate={candidate} hits={hits} folderId={key} />
         </div>
       </details>;
@@ -727,6 +772,7 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
   onPreviewSelectionChange, matches, filterKey }: Omit<FolderListProps, "peers" | "mobile"> & {
   candidate: Candidate; hits: Candidate[]; folderId: string;
 }): React.ReactElement {
+  const requestConfirmation = useConfirmation();
   const preview = request.previews.find(item =>
     folderKey(request.id, item.username, item.directory, item.recursive) === folderId);
   const queuedKeys = new Set(request.transfers.map(remoteFileKey));
@@ -752,11 +798,22 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
         selected={previewSelections.get(preview.id) ?? new Set<string>()}
         onSelectionChange={paths => onPreviewSelectionChange(preview.id, paths)}
         confirmPreview={paths => {
-          const count = paths?.length ?? visibleFiles.filter(file => file.eligible).length;
-          const available = preview.files.filter(file => file.eligible && !queuedKeys.has(remoteFileKey(file))).length;
-          if (confirm(`Queue ${count} files from ${preview.username}\\${preview.directory}?${preview.excluded_count || count < available ?
-            ` Partial folder: ${preview.excluded_count} unavailable and ${available - count} unselected.` : ""}`))
-            void action(() => send(`/requests/${request.id}/queue-folder`, { previewId: preview.id, selectedPaths: paths }));
+          const selected = paths ? new Set(paths) : null;
+          const availableFiles = preview.files.filter(file => file.eligible && !queuedKeys.has(remoteFileKey(file)));
+          const chosen = selected ? availableFiles.filter(file => selected.has(file.path)) : availableFiles;
+          const count = chosen.length;
+          const total = chosen.reduce((sum, file) => sum + file.size, 0);
+          requestConfirmation({
+            title: `Download ${count} file${count === 1 ? "" : "s"}?`,
+            description: `${preview.username}\\${preview.directory} · ${bytes(total)}${
+              preview.excluded_count || count < availableFiles.length ?
+                ` · ${preview.excluded_count} unavailable, ${availableFiles.length - count} unselected` : ""}`,
+            confirmLabel: "Download",
+            onConfirm: () => void action(async () => {
+              await send(`/requests/${request.id}/queue-folder`, { previewId: preview.id, selectedPaths: paths });
+              notifySuccess(`${count} file${count === 1 ? "" : "s"} added to queue`);
+            })
+          });
         }} />}
       {shownHits.length > 0 &&
         <div className="folder-search-hits">
@@ -771,8 +828,8 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
                 <span><strong>{basename(file.path)}</strong>
                   {selectionReason && <small className="warn" title={selectionReason}>{selectionReason}</small>}</span>
               </label>
-            <span className="folder-file-format" title={audioDetails(file.metadata, file.path)}>
-              {fileFormat(file.metadata, file.path)}</span><span className="folder-file-size">{bytes(file.size)}</span></div>;
+            <span className="folder-file-format"><FileDetails file={file} /></span>
+            <span className="folder-file-size">{bytes(file.size)}</span></div>;
           })}
         </div>}
       {previewErrors[folderId] && <small role="alert" className="warn">Inspection failed: {previewErrors[folderId]}.
@@ -830,7 +887,7 @@ function TrackResultsTable({ candidates, canSelect, selected, onSelect }: {
             <span><strong>{basename(candidate.path)}</strong></span>
           </label></td>
           <td className="file-size">{bytes(candidate.size)}</td>
-          <td title={audioDetails(candidate.metadata, candidate.path)}>{fileFormat(candidate.metadata, candidate.path)}
+          <td><FileDetails file={candidate} />
             {!candidate.eligible && <small className="warn">{candidate.reason}</small>}</td>
           <td title={candidate.explanation}>{Math.round(candidate.score * 100)}%</td>
         </tr>)}</tbody></table></div>
@@ -900,7 +957,6 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue, 
         return <li key={child.name}><Collapsible initiallyOpen><summary>{child.name}/ <small>{total.count} file{total.count === 1 ? "" : "s"} · {bytes(total.size)}</small></summary>{render(child)}</Collapsible></li>;
       })}
       {node.files.map(file => {
-        const details = audioDetails(file.metadata, file.path);
         const queued = queuedKeys.has(remoteFileKey(file));
         return <li className="folder-tree-file" key={file.path}
         tabIndex={canQueue && file.eligible && !queued ? 0 : undefined}
@@ -911,7 +967,7 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue, 
           onChange={() => onSelect(file.path)} />
           <span><strong>{basename(file.path)}</strong>{queued ?
             <small className="muted">Already queued</small> : !file.eligible && <small className="warn">{file.reason}</small>}</span>
-        </label><span className="folder-file-format" title={details}>{fileFormat(file.metadata, file.path)}</span>
+        </label><span className="folder-file-format"><FileDetails file={file} /></span>
         <span className="folder-file-size">{bytes(file.size)}</span>
       </li>;
       })}
@@ -1004,13 +1060,25 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKe
 
 function TransferActions({ transfer, action, busy }: { transfer: TransferItem;
   action: (fn: () => Promise<unknown>) => Promise<void>; busy: boolean }): React.ReactElement {
+  const requestConfirmation = useConfirmation();
   return <>
     {["queued", "active"].includes(transfer.status) && <button className="quiet" disabled={busy} onClick={() => {
-      if (confirm(`Cancel ${basename(transfer.path)}?`)) void action(() => send(`/transfers/${transfer.id}/cancel`));
+      requestConfirmation({ title: `Cancel ${basename(transfer.path)}?`,
+        description: "Stops this transfer. Already downloaded files are not deleted.",
+        confirmLabel: "Cancel transfer",
+        onConfirm: () => void action(async () => {
+          await send(`/transfers/${transfer.id}/cancel`);
+          notifySuccess("Transfer cancelled");
+        }) });
     }}>Cancel</button>}
     {["failed", "cancelled"].includes(transfer.status) && <button className="secondary" disabled={busy} onClick={() => {
-      if (confirm(`Retry exactly ${basename(transfer.path)} at the same required quality?`))
-        void action(() => send(`/transfers/${transfer.id}/retry`));
+      requestConfirmation({ title: `Retry ${basename(transfer.path)}?`,
+        description: "Queue exactly this file again using the same required quality.",
+        confirmLabel: "Retry file",
+        onConfirm: () => void action(async () => {
+          await send(`/transfers/${transfer.id}/retry`);
+          notifySuccess("File retry requested");
+        }) });
     }}>Retry file</button>}</>;
 }
 
@@ -1027,16 +1095,20 @@ function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort
   sort: SortState<DownloadSortKey>; dateColumn: "queued" | "updated"; sampleAt: number;
   onSort: (key: DownloadSortKey) => void;
 }): React.ReactElement {
+  const requestConfirmation = useConfirmation();
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const cancelFolder = (batchId: string, username: string, directory: string) => {
-    if (!confirm(`Cancel all ongoing downloads in ${directory || "Shared files"} from ${username}?\n` +
-      "This includes files in this search that are hidden by filters or pagination.")) return;
-    void action(async () => {
-      const result = await send<{ cancelled: number; failures: Array<{ path: string; reason: string }> }>(
-        "/downloads/cancel-folder", { batchId, username, directory });
-      if (result.failures.length) throw new Error(`Cancelled ${result.cancelled}; ${result.failures.length} failed: ` +
-        result.failures.slice(0, 3).map(item => `${basename(item.path)} (${item.reason})`).join("; ") +
-        (result.failures.length > 3 ? "; see Activity Log for the rest" : ""));
+    requestConfirmation({ title: "Cancel all in this folder?",
+      description: `${username}\\${directory || "Shared files"} · Includes matching files hidden by filters or pagination. Downloaded files are not deleted.`,
+      confirmLabel: "Cancel all",
+      onConfirm: () => void action(async () => {
+        const result = await send<{ cancelled: number; failures: Array<{ path: string; reason: string }> }>(
+          "/downloads/cancel-folder", { batchId, username, directory });
+        if (result.failures.length) throw new Error(`Cancelled ${result.cancelled}; ${result.failures.length} failed: ` +
+          result.failures.slice(0, 3).map(item => `${basename(item.path)} (${item.reason})`).join("; ") +
+          (result.failures.length > 3 ? "; see Activity Log for the rest" : ""));
+        notifySuccess(`${result.cancelled} transfer${result.cancelled === 1 ? "" : "s"} cancelled`);
+      })
     });
   };
   const toggleGroup = (key: string) => setCollapsed(current => {
@@ -1047,16 +1119,15 @@ function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort
   });
   return <div className="table-scroll"><table className="data-table download-table"><thead><tr>
     <SortHeading label="File / path" column="file" sort={sort} onSort={onSort} />
-    <SortHeading label="Peer" column="peer" sort={sort} onSort={onSort} />
     <SortHeading label="Status" column="status" sort={sort} onSort={onSort} />
     <SortHeading label="Size" column="size" sort={sort} onSort={onSort} />
     <SortHeading label={dateColumn === "queued" ? "Queued" : "Updated"} column={dateColumn} sort={sort} onSort={onSort} />
-    <th scope="col">Actions</th>
+    <th scope="col"><span className="sr-only">Actions</span></th>
   </tr></thead>{groupDownloads(items).map(group => {
     const searchKey = JSON.stringify([group.batchId]);
     const searchOpen = !collapsed.has(searchKey);
     return <tbody key={group.batchId}>
-      <tr className="download-group-heading"><th scope="rowgroup" colSpan={6}>
+      <tr className="download-group-heading"><th scope="rowgroup" colSpan={5}>
         <div className="download-group-line">
           <DownloadTableToggle label={group.label} open={searchOpen} onToggle={() => toggleGroup(searchKey)} />
           <span className="download-group-meta"><a href={`#/search/${group.batchId}`}>View search</a>
@@ -1068,14 +1139,14 @@ function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort
         const peerKey = JSON.stringify([group.batchId, peer.username]);
         const peerOpen = !collapsed.has(peerKey);
         return <React.Fragment key={peer.username}>
-          <tr className="download-peer-heading"><th scope="row" colSpan={6}>
+          <tr className="download-peer-heading"><th scope="row" colSpan={5}>
             <DownloadTableToggle label={peer.username} open={peerOpen} onToggle={() => toggleGroup(peerKey)} />
           </th></tr>
           {peerOpen && peer.folders.map(folder => {
             const folderGroupKey = JSON.stringify([group.batchId, peer.username, folder.directory]);
             const folderOpen = !collapsed.has(folderGroupKey);
             return <React.Fragment key={folder.directory}>
-              <tr className="download-folder-heading"><th scope="row" colSpan={6} title={folder.directory}>
+              <tr className="download-folder-heading"><th scope="row" colSpan={5} title={folder.directory}>
                 <div className="download-folder-line">
                   <DownloadTableToggle label={folder.directory || "Shared files"} open={folderOpen}
                     onToggle={() => toggleGroup(folderGroupKey)} />
@@ -1090,7 +1161,6 @@ function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort
                 <td data-label="File / path" className="download-file-cell"><strong title={item.path}>{basename(item.path)}</strong>
                   {group.multipleQueries && <small><a href={`#/search/${item.batch_id}?request=${item.request_id}`}>View query</a></small>}
                   <TransferFailure item={item} /></td>
-                <td data-label="Peer" className="download-peer-cell" aria-label={peer.username} />
                 <td data-label="Status"><TransferProgress item={item} sampleAt={sampleAt} /></td>
                 <td data-label="Size">{bytes(item.transferred)} / {bytes(item.size)}</td>
                 <td data-label={dateColumn === "queued" ? "Queued" : "Updated"}>
@@ -1174,7 +1244,8 @@ function ActivityTable({ events, emptyMessage, sort, onSort }: { events: Activit
             <small>{event.event_type === "folder_file_excluded" ? "blocked by old quality rule" :
               event.event_type.replaceAll("_", " ")}
               {event.batch_id && <> · <a href={`#/search/${event.batch_id}${event.request_id ? `?request=${event.request_id}` : ""}`}>
-                {event.request_id ? "Query" : "Search"}</a></>}</small></td>
+                {event.request_id ? "Query" : "Search"}</a></>}</small>
+            {event.severity === "error" && <CopyButton value={event.message} label="Copy error" />}</td>
         </tr>)}</tbody></table></div>;
 }
 
@@ -1272,4 +1343,4 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
           sort.key === "date" ? "Load older events" : "Load more events"}</button>}</section></>;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(<InteractionProvider><App /></InteractionProvider>);

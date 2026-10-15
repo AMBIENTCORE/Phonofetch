@@ -24,6 +24,8 @@ p { color: var(--muted); }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 small { display: block; color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 button, .button {
   display: inline-flex;
   align-items: center;
@@ -165,6 +167,14 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .download-folder-line .download-group-toggle { min-width: 0; }
 .download-folder-cancel { flex: none; font-weight: 600; }
 .download-table .download-file-cell { padding-left: 1.6rem; }
+@media (min-width: 651px) {
+  .download-table thead th:first-child { padding-left: 1.6rem; }
+  .download-table thead th:nth-child(n + 2):nth-child(-n + 4),
+  .download-table tbody td[data-label="Status"],
+  .download-table tbody td[data-label="Size"],
+  .download-table tbody td[data-label="Queued"],
+  .download-table tbody td[data-label="Updated"] { text-align: center; }
+}
 .batch-progress { display: block; width: min(100%, 240px); height: 4px; margin-top: .35rem; border-radius: 4px; background: #353638; }
 .batch-progress span { display: block; height: 100%; border-radius: inherit; background: #bcbcbc; }
 .batch-tally { flex: none; text-align: right; }
@@ -306,6 +316,44 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .context-menu { position: fixed; z-index: 30; min-width: 170px; padding: .25rem; border: 1px solid #777; border-radius: 4px; background: #252628; box-shadow: 0 8px 20px #0009; }
 .context-menu button { width: 100%; min-height: 34px; justify-content: start; border: 0; background: transparent; }
 .context-menu button:hover { background: #424345; }
+.ui-dialog-backdrop { position: fixed; inset: 0; z-index: 40; background: #070b0dcc; }
+.ui-dialog-viewport { position: fixed; inset: 0; z-index: 41; display: grid; place-items: center;
+  overflow-y: auto; padding: 1rem; pointer-events: none; }
+.ui-dialog { width: min(100%, 440px); max-height: calc(100vh - 2rem); overflow-y: auto; padding: 1rem;
+  border: 1px solid #668995; border-radius: 8px; background: #20282d; box-shadow: 0 16px 50px #000b;
+  color: var(--ink); pointer-events: auto; overflow-wrap: anywhere; }
+.ui-dialog h2 { margin: 0 0 .5rem; font-size: 1.2rem; }
+.ui-dialog p { margin: 0 0 1rem; }
+.ui-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; }
+.ui-dialog-actions button { min-height: 36px; padding: .4rem .7rem; }
+.ui-toast-viewport { position: fixed; right: 1rem; bottom: 1rem; z-index: 50; display: grid; gap: .35rem;
+  width: min(320px, calc(100vw - 2rem)); pointer-events: none; }
+.ui-toast { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .55rem .7rem;
+  border: 1px solid #668995; border-radius: 6px; background: #20282d; box-shadow: 0 6px 20px #0009;
+  color: var(--ink); pointer-events: auto; }
+.ui-toast h2 { margin: 0; font-size: .95rem; font-weight: 600; }
+.ui-toast button { min-height: 26px; padding: .2rem .35rem; font-size: .85rem; }
+:root .file-details-trigger { display: inline; min-height: 0; padding: 0; border: 0;
+  border-bottom: 1px dotted #8298a1; border-radius: 0; background: transparent; box-shadow: none;
+  color: inherit; font: inherit; font-weight: 400; text-align: left; cursor: pointer; }
+:root .file-details-trigger:hover { border: 0; border-bottom: 1px solid var(--accent);
+  background: transparent; box-shadow: none; color: var(--accent); }
+.ui-popover-positioner { z-index: 35; }
+.ui-file-popover { width: min(340px, calc(100vw - 1rem)); max-height: min(440px, 65vh); overflow-y: auto;
+  padding: .7rem; border: 1px solid #668995; border-radius: 7px; background: #20282d;
+  box-shadow: 0 10px 30px #000b; color: var(--ink); font-size: .9rem; }
+.ui-file-popover-heading { display: flex; align-items: start; justify-content: space-between; gap: .5rem; }
+.ui-file-popover-heading h2 { min-width: 0; margin: .3rem 0 .65rem; font-size: 1rem; overflow-wrap: anywhere; }
+.ui-file-popover-heading button { flex: none; min-height: 28px; padding: .2rem .35rem; font-size: .85rem; }
+.ui-file-popover dl { display: grid; gap: .35rem; margin: 0 0 .7rem; }
+.ui-file-popover dl > div { display: flex; justify-content: space-between; gap: .5rem; }
+.ui-file-popover dt { color: var(--muted); }
+.ui-file-popover dd { max-width: 68%; margin: 0; text-align: right; overflow-wrap: anywhere; }
+.ui-file-path { display: grid; gap: .25rem; border-top: 1px solid var(--line); padding-top: .5rem; }
+.ui-file-path code { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.ui-copy-action { display: inline-flex; align-items: center; flex-wrap: wrap; gap: .3rem; }
+.ui-copy-action button { min-height: 28px; padding: .2rem .35rem; color: var(--accent); font-size: .85rem; }
+.ui-copy-action small { font-size: .85rem; }
 .check { display: flex; align-items: center; gap: .4rem; padding: .65rem 0; }
 .check input { width: auto; min-height: 0; accent-color: var(--accent); }
 .retry { display: flex; align-items: end; gap: .6rem; margin: .7rem 0; }
@@ -375,6 +423,10 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 650px) {
+  .ui-toast-viewport { top: calc(64px + env(safe-area-inset-top)); right: .7rem; bottom: auto;
+    left: .7rem; width: auto; }
+  .ui-dialog-actions button, .ui-file-popover-heading button, .ui-copy-action button { min-height: 44px; }
+  :root .file-details-trigger { display: inline-flex; align-items: center; min-height: 28px; }
   :root { font-size: 15px; line-height: 1.4; --line: #39474e; --surface: #1c2226; }
   h1 { font-size: 1.75rem; letter-spacing: -.025em; }
   h2 { font-size: 1.15rem; }
@@ -453,7 +505,6 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .download-folder-line { padding-right: .3rem; }
   :root .download-table button.download-group-toggle { min-height: 44px; }
   .download-table tr[aria-label] { padding: .5rem .15rem .5rem .9rem; }
-  .download-table .download-peer-cell { display: none; }
   .download-table .download-file-cell { padding-left: 0; }
   .download-table .download-file-cell::before { display: none; }
   .download-table td { padding: 0 .3rem; border: 0; }
