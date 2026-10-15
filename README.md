@@ -8,6 +8,8 @@ Search directly from the Dashboard, or use the Search tab for multiple queries a
 
 The Dashboard, Downloads and Activity Log have filterable tables with clickable sort headers; track-result tables sort the same way. On phones, tables use compact list rows and plain-text sort headings. Recent downloads group files by search; the Downloads table uses the compact search-results style and nests each search's files under collapsible peer and folder headings, so the path appears once per folder. Select a search, peer, or folder heading to collapse or expand its rows. Ongoing files start in queue order; finished files start newest first. Active progress bars estimate movement between updates (marked `≈`); transferred bytes and completion still come from slskd.
 
+Use **Cancel all** on a Downloads folder row to cancel its ongoing files from that peer and search, including files not currently loaded in the table. Other folders, peers and completed downloads are left alone; any files that slskd could not cancel are reported explicitly. Individual file cancellation remains available.
+
 Failed downloads display the reason reported by slskd when available. If no detail is reported, inspect that transfer in slskd.
 
 ## Screenshots

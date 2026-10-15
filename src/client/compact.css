@@ -121,7 +121,7 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .download-bar-label { position: relative; z-index: 1; color: #fff; font-weight: 700;
   font-size: .68rem; line-height: 1; text-transform: capitalize; }
 .download-actions { text-align: right; }
-.download-actions button { min-height: 24px; padding: .15rem .35rem; font-size: .78rem; }
+.download-actions button, .download-folder-cancel { min-height: 24px; padding: .15rem .35rem; font-size: .78rem; }
 .empty { margin: 0; padding: 1rem 0; }
 .table-filter { width: min(100%, 360px); margin: .5rem 0; }
 .activity-sort-controls { display: flex; align-items: end; flex-wrap: wrap; gap: .6rem; }
@@ -160,6 +160,10 @@ details > summary:focus-visible { outline: 2px solid #bcbcbc; outline-offset: 2p
 .download-table .download-folder-heading th { padding: .38rem .3rem .38rem 1.1rem;
   border-top: 1px solid var(--line); border-bottom: 0; background: transparent;
   color: var(--ink); font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
+.download-table .download-folder-heading th { padding-right: .5rem; }
+.download-folder-line { display: flex; align-items: center; justify-content: space-between; gap: .5rem; min-width: 0; }
+.download-folder-line .download-group-toggle { min-width: 0; }
+.download-folder-cancel { flex: none; font-weight: 600; }
 .download-table .download-file-cell { padding-left: 1.6rem; }
 .batch-progress { display: block; width: min(100%, 240px); height: 4px; margin-top: .35rem; border-radius: 4px; background: #353638; }
 .batch-progress span { display: block; height: 100%; border-radius: inherit; background: #bcbcbc; }
@@ -358,7 +362,7 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
 }
 .download-metrics .metric:nth-child(1) strong { color: #92edf4; }
 .download-metrics .metric:nth-child(2) strong { color: #baf389; }
-.download-actions .quiet { color: var(--danger); }
+.download-actions .quiet, .download-folder-cancel { color: var(--danger); }
 :root :is(.folder-tree-select input, .check input, progress) { accent-color: var(--accent); }
 :root :is(button, a, input, textarea, select):focus-visible { outline-color: var(--accent); }
 .tab-icon, .mobile-activity-label, .mobile-download-tabs, .mobile-download-options,
@@ -446,6 +450,7 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .download-table .download-peer-heading th, .download-table .download-folder-heading th {
     grid-column: 1 / -1; padding: 0; border: 0; background: transparent; }
   .download-table .download-folder-heading th { padding-left: .75rem; }
+  .download-folder-line { padding-right: .3rem; }
   :root .download-table button.download-group-toggle { min-height: 44px; }
   .download-table tr[aria-label] { padding: .5rem .15rem .5rem .9rem; }
   .download-table .download-peer-cell { display: none; }
@@ -564,7 +569,7 @@ progress { width: 100%; height: .55rem; accent-color: var(--accent); }
   .download-section.mobile-selected { display: block; }
   .download-bar { height: 13px; }
   .download-actions { grid-column: 2; text-align: right; }
-  .download-actions button { min-height: 44px; }
+  .download-actions button, .download-folder-cancel { min-height: 44px; }
   .mobile-download-options { display: block; margin: .65rem 0 1.5rem; }
   .mobile-download-options > summary { min-height: 48px; padding: .65rem .5rem; color: var(--muted); cursor: pointer; }
   .mobile-download-options button { width: 100%; margin: .3rem 0; }

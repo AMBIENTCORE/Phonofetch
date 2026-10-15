@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import express, { type ErrorRequestHandler, type Express } from "express";
 import { z, ZodError } from "zod";
-import type { Batch, Candidate, FolderPreview, MusicRequest, Quality } from "../shared/types";
+import type { Batch, Candidate, FolderPreview, MusicRequest, Quality, TransferItem } from "../shared/types";
 import { ApiError, installAuth } from "./auth";
 import type { Config } from "./config";
 import { Store, batchName } from "./db";
-import { normalize, parseLines } from "./matching";
+import { normalize, parentDirectory, parseLines } from "./matching";
 import type { SlskdPort } from "./port";
 import { SlskdError, SlskdRequestError, SlskdShapeError } from "./slskd";
 import { Workflow } from "./workflow";
@@ -182,19 +182,63 @@ export function createApp(store: Store, port: SlskdPort, config: Config, workflo
     workflow.showAllResults(getRequest(req.params.id));
     res.json({ ok: true });
   });
+  type CancelTarget = Pick<TransferItem, "id" | "request_id" | "username" | "path" | "status" | "queue_id" | "slskd_id">;
+  function recordCancellation(transfer: CancelTarget): void {
+    const current = store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", transfer.id);
+    if (current?.status !== transfer.status) throw new ApiError(409, "Transfer state changed; refresh downloads");
+    store.run("UPDATE transfers SET status='cancelled',error=NULL,updated_at=? WHERE id=? AND status=?",
+      new Date().toISOString(), transfer.id, transfer.status);
+    store.event("warning", "transfer", "cancelled", `Transfer cancelled: ${transfer.path}`,
+      { requestId: transfer.request_id, transferId: transfer.id });
+  }
+  app.post("/api/downloads/cancel-folder", async (req, res) => {
+    const { batchId, username, directory } = z.object({
+      batchId: uuid, username: z.string().min(1), directory: z.string()
+    }).parse(req.body);
+    const folder = store.all<CancelTarget>(`SELECT t.id,t.request_id,t.username,t.path,t.status,t.queue_id,t.slskd_id
+      FROM transfers t JOIN requests r ON r.id=t.request_id
+      WHERE r.batch_id=? AND t.username=? AND t.status IN ('ready','queueing','queued','active','uncertain')
+      ORDER BY t.created_at,t.id`, batchId, username)
+      .filter(transfer => parentDirectory(transfer.path) === directory);
+    if (!folder.length) throw new ApiError(409, "No ongoing downloads in this folder");
+    const live = await port.transfers();
+    const failures: Array<{ id: string; path: string; reason: string }> = [];
+    let cancelled = 0;
+    for (const transfer of folder) {
+      try {
+        const current = store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", transfer.id);
+        if (current?.status !== transfer.status) throw new ApiError(409, "Transfer state changed; refresh downloads");
+        const remote = live.find(item => item.username === transfer.username && item.path === transfer.path &&
+          (item.id === transfer.slskd_id || transfer.queue_id !== null && item.batchId === transfer.queue_id));
+        if (remote && !["queued", "active"].includes(remote.status))
+          throw new ApiError(409, `slskd reports ${remote.status}; wait for reconciliation`);
+        if (!remote && transfer.status !== "ready")
+          throw new ApiError(409, "Transfer not confirmed in slskd; wait for reconciliation");
+        if (remote) await port.cancel(transfer.username, remote.id);
+        recordCancellation(transfer);
+        cancelled++;
+      } catch (error) {
+        const detail = store.redact(error instanceof Error ? error.message : "Unknown cancellation error");
+        store.event("error", "transfer", "cancel_failed", `Could not cancel ${transfer.path}: ${detail}`,
+          { requestId: transfer.request_id, transferId: transfer.id });
+        failures.push({ id: transfer.id, path: transfer.path,
+          reason: error instanceof ApiError || error instanceof SlskdError || error instanceof SlskdRequestError ?
+            detail : "Cancellation failed; see Activity Log" });
+      }
+    }
+    res.json({ cancelled, failures });
+  });
   app.post("/api/transfers/:id/cancel", async (req, res) => {
     const id = uuid.parse(req.params.id);
-    const transfer = store.get<{ username: string; path: string; status: string; request_id: string; slskd_id: string | null }>(
-      "SELECT username,path,status,request_id,slskd_id FROM transfers WHERE id=?", id);
+    const transfer = store.get<CancelTarget>(
+      "SELECT id,request_id,username,path,status,queue_id,slskd_id FROM transfers WHERE id=?", id);
     if (!transfer) throw new ApiError(404, "Transfer not found");
     if (!["queued", "active"].includes(transfer.status)) throw new ApiError(409, "Transfer cannot be cancelled in this state");
     const remoteId = transfer.slskd_id ?? (await port.transfers()).find(item =>
       item.username === transfer.username && item.path === transfer.path)?.id;
     if (!remoteId) throw new ApiError(409, "slskd transfer ID unavailable; wait for reconciliation");
     await port.cancel(transfer.username, remoteId);
-    store.run("UPDATE transfers SET status='cancelled',updated_at=? WHERE id=?", new Date().toISOString(), id);
-    store.event("warning", "transfer", "cancelled", `Transfer cancelled: ${transfer.path}`,
-      { requestId: transfer.request_id, transferId: id });
+    recordCancellation(transfer);
     res.json({ ok: true });
   });
   app.post("/api/transfers/:id/retry", async (req, res) => {

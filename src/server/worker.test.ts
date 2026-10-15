@@ -259,6 +259,33 @@ describe("worker retries and recovery", () => {
     expect(h.port.enqueue).not.toHaveBeenCalled();
   });
 
+  it("does not enqueue a later ready file cancelled while an earlier file is being queued", async () => {
+    const h = harness();
+    h.store.run("UPDATE requests SET status='review' WHERE id=?", h.id);
+    h.store.run(`INSERT INTO candidates(id,request_id,username,path,directory,size,metadata,eligible,reason,score,explanation,selected)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,0)`, h.candidate.id, h.id, h.candidate.username, h.candidate.path,
+    h.candidate.directory, h.candidate.size, JSON.stringify(h.candidate.metadata), 1,
+    h.candidate.reason, h.candidate.score, h.candidate.explanation);
+    h.workflow.queueTrack(h.getRequest(), h.candidate);
+    const laterId = "b93f25ca-962f-4f3c-a2e6-14f961891a6c";
+    const laterPath = "Burial\\Untrue\\02 Ghost.flac";
+    const date = new Date(Date.now() + 1000).toISOString();
+    h.store.run(`INSERT INTO candidates(id,request_id,username,path,directory,size,metadata,eligible,reason,score,explanation,selected)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`, "3b22d8c0-a0cc-4d02-9787-df01e7bff654", h.id,
+    h.candidate.username, laterPath, h.candidate.directory, 100, JSON.stringify(h.candidate.metadata),
+    1, h.candidate.reason, h.candidate.score, h.candidate.explanation);
+    h.store.run(`INSERT INTO transfers(id,queue_id,request_id,folder_job_id,username,path,size,status,created_at,updated_at)
+      VALUES(?,?,?,NULL,?,?,100,'ready',?,?)`, laterId, laterId, h.id,
+    h.candidate.username, laterPath, date, date);
+    vi.mocked(h.port.enqueue).mockImplementationOnce(async () => {
+      h.store.run("UPDATE transfers SET status='cancelled' WHERE id=?", laterId);
+      return "first-transfer";
+    });
+    await h.worker.runOnce();
+    expect(h.port.enqueue).toHaveBeenCalledOnce();
+    expect(h.store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", laterId)?.status).toBe("cancelled");
+  });
+
   it("reopens SQLite after restart and reconciles an unfinished transfer by persisted batch ID", async () => {
     const h = harness();
     h.store.run("UPDATE requests SET status='review' WHERE id=?", h.id);

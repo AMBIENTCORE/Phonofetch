@@ -245,7 +245,7 @@ function Dashboard({ reload, action, busy }: {
     matchesText(activityFilter, event.message, event.category, event.severity, event.event_type)),
   event => ({ date: event.created_at, severity: event.severity, category: event.category,
     message: event.message })[activitySort.key], activitySort.direction);
-  return <><div className="page-title"><div><h1>Dashboard</h1><p>Downloads and recent searches.</p></div></div>
+  return <><div className="page-title"><div><h1>Dashboard</h1></div></div>
     {data?.slskd_status === "unavailable" && <p role="status" className="service-warning">slskd unavailable. Searches stay pending until it reconnects. <a href="#/activity">View Activity Log</a></p>}
     <p role="alert">{error}</p>
     <form className="panel dashboard-search" onSubmit={event => {
@@ -262,7 +262,6 @@ function Dashboard({ reload, action, busy }: {
           placeholder="Artist, album, or track" />
         <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
       </div>
-      <small>Starts searching and opens the results page.</small>
       {searchError && <small className="warn" role="alert">{searchError}</small>}
     </form>
     <DownloadMetrics stats={data?.downloads.stats} />
@@ -363,7 +362,7 @@ function DownloadsPage({ reload, action, busy }: {
     return () => { mounted = false; };
   }, [reload, activeLimit, finishedLimit, activeSort.key, activeSort.direction,
     finishedSort.key, finishedSort.direction]);
-  return <><div className="page-title"><div><h1>Downloads</h1><p>slskd transfers; clearing this view never deletes downloaded files.</p></div></div>
+  return <><div className="page-title"><div><h1>Downloads</h1></div></div>
     <p role="alert">{error}</p>
     <DownloadMetrics stats={data?.stats} />
     <div className="download-controls">
@@ -416,7 +415,7 @@ function NewBatch({ action, busy, initialInput }: {
   const [automaticQuality, setAutomaticQuality] = useState<Quality>("mp3_320");
   const [automatic, setAutomatic] = useState(false);
   const [automaticType, setAutomaticType] = useState<"track" | "album_folder">("track");
-  return <><div className="page-title"><div><h1>Search</h1><p>One query per line · up to 100 queries</p></div></div>
+  return <><div className="page-title"><div><h1>Search</h1></div></div>
     <form className="panel form-panel" onSubmit={event => { event.preventDefault(); void action(async () => {
       location.hash = `#/search/${await createSearch(input, automatic ? automaticType : undefined, automaticQuality)}`;
     }); }}>
@@ -1029,6 +1028,17 @@ function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort
   onSort: (key: DownloadSortKey) => void;
 }): React.ReactElement {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const cancelFolder = (batchId: string, username: string, directory: string) => {
+    if (!confirm(`Cancel all ongoing downloads in ${directory || "Shared files"} from ${username}?\n` +
+      "This includes files in this search that are hidden by filters or pagination.")) return;
+    void action(async () => {
+      const result = await send<{ cancelled: number; failures: Array<{ path: string; reason: string }> }>(
+        "/downloads/cancel-folder", { batchId, username, directory });
+      if (result.failures.length) throw new Error(`Cancelled ${result.cancelled}; ${result.failures.length} failed: ` +
+        result.failures.slice(0, 3).map(item => `${basename(item.path)} (${item.reason})`).join("; ") +
+        (result.failures.length > 3 ? "; see Activity Log for the rest" : ""));
+    });
+  };
   const toggleGroup = (key: string) => setCollapsed(current => {
     const next = new Set(current);
     if (next.has(key)) next.delete(key);
@@ -1066,8 +1076,14 @@ function DownloadTable({ items, action, busy, sort, dateColumn, sampleAt, onSort
             const folderOpen = !collapsed.has(folderGroupKey);
             return <React.Fragment key={folder.directory}>
               <tr className="download-folder-heading"><th scope="row" colSpan={6} title={folder.directory}>
-                <DownloadTableToggle label={folder.directory || "Shared files"} open={folderOpen}
-                  onToggle={() => toggleGroup(folderGroupKey)} />
+                <div className="download-folder-line">
+                  <DownloadTableToggle label={folder.directory || "Shared files"} open={folderOpen}
+                    onToggle={() => toggleGroup(folderGroupKey)} />
+                  {folder.files.some(item => ["ready", "queueing", "queued", "active", "uncertain"].includes(item.status)) &&
+                    <button type="button" className="quiet download-folder-cancel" disabled={busy}
+                      aria-label={`Cancel all downloads in ${folder.directory || "Shared files"} from ${peer.username}`}
+                      onClick={() => cancelFolder(group.batchId, peer.username, folder.directory)}>Cancel all</button>}
+                </div>
               </th></tr>
               {folderOpen && folder.files.map(item => <tr key={item.id} aria-label={`${peer.username}, ${
                 folder.directory || "Shared files"}, ${basename(item.path)}`}>
@@ -1224,10 +1240,9 @@ function ActivityPage({ reload }: { reload: number }): React.ReactElement {
     link.click();
     URL.revokeObjectURL(link.href);
   };
-  return <><div className="page-title"><div><h1>Activity Log</h1>
-    <p>Persistent events · Europe/Lisbon time</p></div>
+  return <><div className="page-title"><div><h1>Activity Log</h1></div>
     <button className="secondary desktop-activity-export" onClick={exportEvents}>Export loaded events</button></div>
-    <section className="panel activity-panel"><div className="panel-heading"><div><h2>Events</h2><small>Stored on your NAS</small></div>
+    <section className="panel activity-panel"><div className="panel-heading"><div><h2>Events</h2></div>
       <button className="secondary filter-toggle" aria-controls="activity-filters" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(open => !open)}>
         Filters{activeFilters ? ` (${activeFilters})` : ""} <span aria-hidden="true">{filtersOpen ? "−" : "+"}</span></button></div>
       <details className="mobile-activity-options"><summary>More options</summary>

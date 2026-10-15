@@ -353,6 +353,8 @@ export class Worker {
       }
       this.store.run("UPDATE transfers SET status='queueing',updated_at=? WHERE id=? AND status='ready'",
         new Date().toISOString(), item.id);
+      if (this.store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", item.id)?.status !== "queueing")
+        continue;
       try {
         const request = this.store.get<MusicRequest>("SELECT * FROM requests WHERE id=?", item.request_id);
         if (!request) throw new Error("Request missing");

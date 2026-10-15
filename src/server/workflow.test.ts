@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -83,6 +84,107 @@ const entries = [
 ];
 
 describe("authenticated mixed-batch workflow", () => {
+  it("cancels all ongoing downloads in one search/peer/folder, including unloaded ready files", async () => {
+    const { app, store, port, transfers, worker } = setup();
+    const auth = await login(app);
+    const makeSearch = async (text: string): Promise<{ batchId: string; requestId: string }> => {
+      const created = await request(app).post("/api/batches").set(auth).send({
+        originalInput: text, defaultType: "search", mode: "review",
+        entries: [{ original: text, queryText: text, type: "search", seedKind: "track_seed", quality: "any" }]
+      });
+      const requestId = store.get<{ id: string }>("SELECT id FROM requests WHERE batch_id=?", created.body.id)?.id;
+      if (!requestId) throw new Error("Search request missing");
+      store.run("UPDATE requests SET status='active' WHERE id=?", requestId);
+      return { batchId: created.body.id as string, requestId };
+    };
+    const first = await makeSearch("First search");
+    const other = await makeSearch("Other search");
+    const add = (requestId: string, username: string, path: string, status: "ready" | "queued" | "active" | "completed") => {
+      const id = randomUUID();
+      const remoteId = status === "queued" || status === "active" ? randomUUID() : null;
+      const date = new Date().toISOString();
+      store.run(`INSERT INTO transfers(id,queue_id,request_id,folder_job_id,username,path,size,status,slskd_id,created_at,updated_at)
+        VALUES(?,?,?,NULL,?,?,?,?,?,?,?)`, id, id, requestId, username, path, 100, status, remoteId, date, date);
+      if (remoteId && (status === "queued" || status === "active"))
+        transfers.push({ id: remoteId, batchId: id, username, path, size: 100,
+        transferred: 0, status });
+      return { id, remoteId };
+    };
+    const queued = add(first.requestId, "alice", "Music\\Album\\01.flac", "queued");
+    const active = add(first.requestId, "alice", "Music\\Album\\02.flac", "active");
+    const ready = add(first.requestId, "alice", "Music\\Album\\03.flac", "ready");
+    const finished = add(first.requestId, "alice", "Music\\Album\\04.flac", "completed");
+    const sibling = add(first.requestId, "alice", "Music\\Album 2\\05.flac", "queued");
+    const anotherPeer = add(first.requestId, "bob", "Music\\Album\\06.flac", "queued");
+    const anotherSearch = add(other.requestId, "alice", "Music\\Album\\07.flac", "queued");
+    const body = { batchId: first.batchId, username: "alice", directory: "Music\\Album" };
+    expect((await request(app).post("/api/downloads/cancel-folder").set(headers).send(body)).status).toBe(401);
+    expect((await request(app).post("/api/downloads/cancel-folder")
+      .set({ ...headers, Cookie: auth.Cookie }).send(body)).status).toBe(403);
+    const response = await request(app).post("/api/downloads/cancel-folder").set(auth).send(body);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ cancelled: 3, failures: [] });
+    expect(vi.mocked(port.cancel).mock.calls).toEqual(expect.arrayContaining([
+      ["alice", queued.remoteId], ["alice", active.remoteId]
+    ]));
+    expect(port.cancel).toHaveBeenCalledTimes(2);
+    const statuses = store.all<{ id: string; status: string }>("SELECT id,status FROM transfers");
+    const state = (id: string) => statuses.find(item => item.id === id)?.status;
+    expect([queued.id, active.id, ready.id].map(state)).toEqual(["cancelled", "cancelled", "cancelled"]);
+    expect([finished.id, sibling.id, anotherPeer.id, anotherSearch.id].map(state))
+      .toEqual(["completed", "queued", "queued", "queued"]);
+    expect((await request(app).post("/api/downloads/cancel-folder").set(auth).send(body)).status).toBe(409);
+    await worker.runOnce();
+    expect(port.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("reports per-file cancel failures and keeps unconfirmed transfers unchanged", async () => {
+    const { app, store, port, transfers } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Album", defaultType: "search", mode: "review",
+      entries: [{ original: "Album", queryText: "Album", type: "search", seedKind: "track_seed", quality: "any" }]
+    });
+    const requestId = store.get<{ id: string }>("SELECT id FROM requests WHERE batch_id=?", created.body.id)?.id;
+    if (!requestId) throw new Error("Search request missing");
+    const add = (filename: string, status: "queued" | "queueing" | "uncertain") => {
+      const id = randomUUID();
+      const remoteId = status === "queued" ? randomUUID() : null;
+      const path = `Music\\Album\\${filename}`;
+      const date = new Date().toISOString();
+      store.run(`INSERT INTO transfers(id,queue_id,request_id,folder_job_id,username,path,size,status,slskd_id,created_at,updated_at)
+        VALUES(?,?,?,NULL,'alice',?,?,?,?,?,?)`, id, id, requestId, path, 100, status, remoteId, date, date);
+      if (remoteId) transfers.push({ id: remoteId, batchId: id, username: "alice", path, size: 100,
+        transferred: 0, status: "queued" });
+      return id;
+    };
+    const failed = add("01.flac", "queued");
+    const success = add("02.flac", "queued");
+    const pending = add("03.flac", "queueing");
+    const uncertain = add("04.flac", "uncertain");
+    const completedRemotely = add("05.flac", "queued");
+    const completed = transfers.find(item => item.batchId === completedRemotely);
+    if (!completed) throw new Error("Remote transfer missing");
+    completed.status = "completed";
+    vi.mocked(port.cancel).mockRejectedValueOnce(new Error("Peer declined cancellation"));
+    const response = await request(app).post("/api/downloads/cancel-folder").set(auth)
+      .send({ batchId: created.body.id, username: "alice", directory: "Music\\Album" });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ cancelled: 1, failures: [
+      { id: failed, reason: "Cancellation failed; see Activity Log" },
+      { id: pending, reason: "Transfer not confirmed in slskd; wait for reconciliation" },
+      { id: uncertain, reason: "Transfer not confirmed in slskd; wait for reconciliation" },
+      { id: completedRemotely, reason: "slskd reports completed; wait for reconciliation" }
+    ] });
+    expect(port.cancel).toHaveBeenCalledTimes(2);
+    expect(store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", success)?.status).toBe("cancelled");
+    expect(store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", failed)?.status).toBe("queued");
+    expect(store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", pending)?.status).toBe("queueing");
+    expect(store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", uncertain)?.status).toBe("uncertain");
+    expect(store.get<{ status: string }>("SELECT status FROM transfers WHERE id=?", completedRemotely)?.status).toBe("queued");
+    expect(store.activity({ category: "transfer", search: "Could not cancel" })).toHaveLength(4);
+  });
+
   it("downloads checked audio and non-audio hits from multiple peers without inspecting their folders", async () => {
     const { app, worker, store, port, folderFiles, setSnapshot } = setup();
     const mp3 = { ...folderFiles[2]!, username: "bob",
