@@ -728,13 +728,19 @@ type FolderListProps = {
 
 function FolderCandidateList({ peers, mobile, ...body }: FolderListProps): React.ReactElement {
   const sorted = [...peers].sort((a, b) => peerOrder(a[1][0]?.[1][0], b[1][0]?.[1][0]));
-  if (mobile) return <div className="mobile-folder-list">{sorted.flatMap(([, folders]) =>
-    folders.map(([key, hits]) => {
+  const inspect = (candidate: Candidate, key: string) => void body.action(async () => {
+    await send<FolderPreview>(`/requests/${body.request.id}/preview`,
+      { candidateId: candidate.id, recursive: body.recursive });
+    body.clearPreviewError(key);
+  });
+  if (mobile) return <div className="mobile-folder-list">{sorted.flatMap(([, folders], peerIndex) =>
+    folders.map(([key, hits], folderIndex) => {
       const candidate = hits[0]!;
       const preview = body.request.previews.find(item =>
         folderKey(body.request.id, item.username, item.directory, item.recursive) === key);
       const files = preview?.files ?? hits;
-      return <details className="mobile-folder-card" key={key} onToggle={event => {
+      return <details className={`mobile-folder-card${peerIndex > 0 && folderIndex === 0 ? " peer-break" : ""}`}
+        key={key} onToggle={event => {
         if (event.currentTarget.open && event.currentTarget === event.target)
           event.currentTarget.scrollIntoView({ block: "start" });
       }}>
@@ -749,28 +755,41 @@ function FolderCandidateList({ peers, mobile, ...body }: FolderListProps): React
         <div className="mobile-folder-detail">
           {candidate.directory && <details className="mobile-folder-path"><summary>Full path</summary>
             <small>{candidate.directory}</small><CopyButton value={candidate.directory} /></details>}
-          <FolderCandidateBody {...body} candidate={candidate} hits={hits} folderId={key} />
+          <FolderCandidateBody {...body} candidate={candidate} hits={hits} folderId={key}
+            onInspect={() => inspect(candidate, key)} showInspectAction />
         </div>
       </details>;
     }))}</div>;
-  return <>{sorted.flatMap(([username, folders]) => folders.map(([key, hits]) => {
+  return <>{sorted.flatMap(([username, folders], peerIndex) => folders.map(([key, hits], folderIndex) => {
     const candidate = hits[0]!;
-    return <Collapsible className="peer-group folder-result" initiallyOpen key={key}>
+    const preview = body.request.previews.find(item =>
+      folderKey(body.request.id, item.username, item.directory, item.recursive) === key);
+    const showInspect = body.canInspect && Boolean(candidate.directory) &&
+      (!preview || !preview.files.some(body.matches));
+    return <Collapsible className={`peer-group folder-result${peerIndex > 0 && folderIndex === 0 ? " peer-break" : ""}`}
+      initiallyOpen key={key}>
       <summary><span className="folder-result-peer">{username}{folders.length > 1 ? ` (${folders.length})` : ""} ·
         {" "}{peerDetails(candidate)} ·{" "}</span>
         <strong className="folder-result-path">{candidate.directory || "Shared files"}</strong>
-        <span className="folder-result-match">{" "}[{Math.round(candidate.score * 100)}%]</span></summary>
+        <span className="folder-result-match">{" "}[{Math.round(candidate.score * 100)}%]</span>
+        {showInspect && <button type="button" className="quiet folder-heading-inspect"
+          disabled={body.busy || body.inspecting.has(key)} onClick={event => {
+            event.preventDefault();
+            event.stopPropagation();
+            inspect(candidate, key);
+          }}>{body.inspecting.has(key) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}</summary>
       <div className="folder-candidate">
-        <FolderCandidateBody {...body} candidate={candidate} hits={hits} folderId={key} />
+        <FolderCandidateBody {...body} candidate={candidate} hits={hits} folderId={key}
+          onInspect={() => inspect(candidate, key)} showInspectAction={false} />
       </div>
     </Collapsible>;
   }))}</>;
 }
 
-function FolderCandidateBody({ request, candidate, hits, folderId, recursive, canInspect, busy, inspecting,
-  previewErrors, clearPreviewError, action, selectedHits, onSelectHit, previewSelections,
-  onPreviewSelectionChange, matches, filterKey }: Omit<FolderListProps, "peers" | "mobile"> & {
-  candidate: Candidate; hits: Candidate[]; folderId: string;
+function FolderCandidateBody({ request, candidate, hits, folderId, canInspect, busy, inspecting,
+  previewErrors, action, selectedHits, onSelectHit, previewSelections,
+  onPreviewSelectionChange, matches, filterKey, onInspect, showInspectAction }: Omit<FolderListProps, "peers" | "mobile"> & {
+  candidate: Candidate; hits: Candidate[]; folderId: string; onInspect: () => void; showInspectAction: boolean;
 }): React.ReactElement {
   const requestConfirmation = useConfirmation();
   const preview = request.previews.find(item =>
@@ -782,18 +801,15 @@ function FolderCandidateBody({ request, candidate, hits, folderId, recursive, ca
   const shownHits = !preview || !visibleFiles.length || previewExpired || previewErrors[folderId] ?
     visibleHits : searchHitsOutsidePreview(visibleHits, preview, selectedHits);
   const hitBytes = shownHits.reduce((total, file) => total + file.size, 0);
-  const refreshFolder = () => void action(async () => {
-    await send<FolderPreview>(`/requests/${request.id}/preview`, { candidateId: candidate.id, recursive });
-    clearPreviewError(folderId);
-  });
-  return <>{(!preview || !visibleFiles.length) && <div className="candidate">
+  return <>{showInspectAction && canInspect && candidate.directory && (!preview || !visibleFiles.length) &&
+    <div className="candidate">
         <span><strong>{candidate.directory || "Shared files"}</strong><small title={candidate.explanation}>Match {Math.round(candidate.score * 100)}%</small></span>
-        {canInspect && candidate.directory && <button className="quiet" disabled={busy || inspecting.has(folderId)}
-          onClick={refreshFolder}>{inspecting.has(folderId) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}
+        <button className="quiet" disabled={busy || inspecting.has(folderId)}
+          onClick={onInspect}>{inspecting.has(folderId) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>
       </div>}
       {preview && visibleFiles.length > 0 && <Preview key={preview.id} preview={preview}
         visibleFiles={visibleFiles} filterActive={filterKey !== "all:"} busy={busy} canQueue={canInspect}
-        onRefresh={canInspect && candidate.directory ? refreshFolder : undefined} refreshing={inspecting.has(folderId)}
+        onRefresh={canInspect && candidate.directory ? onInspect : undefined} refreshing={inspecting.has(folderId)}
         queuedKeys={queuedKeys}
         selected={previewSelections.get(preview.id) ?? new Set<string>()}
         onSelectionChange={paths => onPreviewSelectionChange(preview.id, paths)}
@@ -923,10 +939,10 @@ interface FolderTreeNode {
   files: PreviewFile[];
 }
 
-function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue, queuedKeys }: {
+function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue, queuedKeys, showColumns = false }: {
   preview: FolderPreview; files: PreviewFile[]; selected: ReadonlySet<string>; onSelect: (path: string) => void;
   onFileMenu: (event: React.MouseEvent | React.KeyboardEvent, file: PreviewFile) => void; canQueue: boolean;
-  queuedKeys: ReadonlySet<string>;
+  queuedKeys: ReadonlySet<string>; showColumns?: boolean;
 }): React.ReactElement {
   const root: FolderTreeNode = { name: preview.directory, directories: new Map(), files: [] };
   const prefix = `${preview.directory.replace(/\\/g, "/").replace(/\/+$/, "")}/`;
@@ -973,7 +989,10 @@ function FolderTree({ preview, files, selected, onSelect, onFileMenu, canQueue, 
       })}
     </ul>;
   }
-  return <div className="folder-tree-scroll">{render(root)}</div>;
+  return <div className="folder-tree-scroll">
+    {showColumns && <div className="folder-tree-columns"><span>File</span><span>Type / bitrate</span><span>Size</span></div>}
+    {render(root)}
+  </div>;
 }
 
 function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKeys, onRefresh, refreshing,
@@ -995,6 +1014,8 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKe
   const visiblePaths = new Set(visibleFiles.map(file => file.path));
   const hiddenSelected = selectedFiles.filter(file => !visiblePaths.has(file.path)).length;
   const queuedVisible = visibleFiles.filter(file => queuedKeys.has(remoteFileKey(file))).length;
+  const allQueued = eligible.length > 0 && availableVisible.length === 0 &&
+    eligible.every(file => queuedKeys.has(remoteFileKey(file)));
   const notes = [preview.recursive ? "Includes subfolders" : "",
     excluded.length ? `${availableVisible.length} selectable · ${excluded.length} unavailable` : "",
     queuedVisible ? `${queuedVisible} already queued` : "",
@@ -1024,12 +1045,14 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKe
         {filterActive && ` shown · ${bytes(preview.audio_bytes)} folder`}</span>
       {notes && <small className="folder-summary-notes">{notes}</small>}
     </div>
-    {eligible.length ? <>
-      <div className="folder-tree-columns"><span>File</span><span>Type / bitrate</span><span>Size</span></div>
+    {eligible.length ? allQueued ?
+      <details className="queued-folder-files"><summary>Files ({eligible.length})</summary>
+        <FolderTree preview={preview} files={eligible} selected={selected} onSelect={chooseFile}
+          queuedKeys={queuedKeys} onFileMenu={openFileMenu} canQueue={canDownload} showColumns />
+      </details> :
       <FolderTree preview={preview} files={eligible} selected={selected} onSelect={chooseFile}
-        queuedKeys={queuedKeys}
-        onFileMenu={openFileMenu} canQueue={canDownload} />
-    </> : <small>No selectable files match this filter. Select All or adjust the filter to see other files.</small>}
+        queuedKeys={queuedKeys} onFileMenu={openFileMenu} canQueue={canDownload} showColumns /> :
+      <small>No selectable files match this filter. Select All or adjust the filter to see other files.</small>}
     {excluded.length > 0 && <details className="excluded-results">
       <summary>Excluded ({excluded.length}) · {bytes(preview.audio_bytes - preview.eligible_bytes)}</summary>
       <FolderTree preview={preview} files={excluded} selected={selected} onSelect={chooseFile}
@@ -1037,7 +1060,8 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKe
         onFileMenu={openFileMenu} canQueue={false} />
     </details>}
     {expired && <small className="warn">Preview expired. Refresh this folder before downloading.</small>}
-    {canQueue && <div className={`folder-actions${selectedFiles.length ? " has-selection" : ""}`}>
+    {canQueue && (allEligible.length > 0 || selected.size > 0) &&
+    <div className={`folder-actions${selectedFiles.length ? " has-selection" : ""}`}>
       <span className="mobile-selection-summary" aria-live="polite">{selectedFiles.length
         ? `${selectedFiles.length} selected · ${bytes(selectedBytes)}`
         : `${allEligible.length} available · ${bytes(allEligible.reduce((sum, file) => sum + file.size, 0))}`}</span>
