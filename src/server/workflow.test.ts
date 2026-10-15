@@ -229,6 +229,35 @@ describe("authenticated mixed-batch workflow", () => {
       .send({ candidateIds: [candidates[0].id] })).status).toBe(409);
   });
 
+  it("rejects expired folder listings while keeping saved search hits downloadable", async () => {
+    const { app, store, worker, port } = setup();
+    const auth = await login(app);
+    const created = await request(app).post("/api/batches").set(auth).send({
+      originalInput: "Burial Song", defaultType: "search", mode: "review",
+      entries: [{ original: "Burial Song", queryText: "Burial Song", type: "search",
+        seedKind: "track_seed", quality: "any" }]
+    });
+    await worker.runOnce();
+    const item = (await request(app).get(`/api/batches/${created.body.id}`).set(auth)).body.requests[0];
+    const inspected = await request(app).post(`/api/requests/${item.id}/preview`).set(auth)
+      .send({ candidateId: item.candidates[0].id });
+    expect(inspected.status).toBe(200);
+    store.run("UPDATE folder_previews SET created_at=? WHERE id=?",
+      new Date(Date.now() - 11 * 60 * 1000).toISOString(), inspected.body.id);
+    const expired = await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: inspected.body.id, selectedPaths: [item.candidates[0].path] });
+    expect(expired.status).toBe(409);
+    expect(expired.body.error).toContain("preview expired");
+    expect(store.all("SELECT id FROM transfers")).toHaveLength(0);
+    store.run("UPDATE folder_previews SET created_at=? WHERE id=?", "not-a-timestamp", inspected.body.id);
+    expect((await request(app).post(`/api/requests/${item.id}/queue-folder`).set(auth)
+      .send({ previewId: inspected.body.id, selectedPaths: [item.candidates[0].path] })).status).toBe(409);
+    expect((await request(app).post(`/api/requests/${item.id}/select-hits`).set(auth)
+      .send({ candidateIds: [item.candidates[0].id] })).status).toBe(202);
+    await worker.runOnce();
+    expect(port.enqueue).toHaveBeenCalledOnce();
+  });
+
   it("queues another folder and search hit after a first album without duplicating its files", async () => {
     const { app, worker, folderFiles, port, transfers, setSnapshot } = setup();
     const second = { ...remote("bob\\Hybrid Theory\\01 - Papercut.flac"), username: "bob" };

@@ -13,7 +13,7 @@ import { matchesResult, parseResultFilter, type ResultPreset } from "./result-fi
 import { searchDraftQuery } from "./search-navigation";
 import { sortRows, toggleSort, type SortState } from "./table-sort";
 import type { DownloadSort } from "../server/db";
-import { canAppendManualSearch, canInspectFolder, canQueueSearchHits, remoteFileKey } from "../shared/search-selection";
+import { canAppendManualSearch, canInspectFolder, canQueueSearchHits, isFolderPreviewExpired, remoteFileKey } from "../shared/search-selection";
 import "./compact.css";
 
 let csrf = "";
@@ -578,8 +578,9 @@ function RequestCard({ request, singleQuery, action, busy, inspecting, previewEr
   const otherFolders = new Map<string, Array<[string, Candidate[]]>>();
   for (const entry of grouped) {
     const [key, hits] = entry;
-    const preview = request.previews.find(item =>
+    const savedPreview = request.previews.find(item =>
       folderKey(request.id, item.username, item.directory, item.recursive) === key);
+    const preview = savedPreview && !isFolderPreviewExpired(savedPreview.created_at) ? savedPreview : undefined;
     if (!hits.some(matches) && !preview?.files.some(matches)) continue;
     const groups = preset === "all" || request.type === "search" ||
       (preview ? preview.files.some(file => matches(file) && file.eligible) : hits.some(hit => matches(hit) && hit.eligible))
@@ -736,8 +737,9 @@ function FolderCandidateList({ peers, mobile, ...body }: FolderListProps): React
   if (mobile) return <div className="mobile-folder-list">{sorted.flatMap(([, folders], peerIndex) =>
     folders.map(([key, hits], folderIndex) => {
       const candidate = hits[0]!;
-      const preview = body.request.previews.find(item =>
+      const savedPreview = body.request.previews.find(item =>
         folderKey(body.request.id, item.username, item.directory, item.recursive) === key);
+      const preview = savedPreview && !isFolderPreviewExpired(savedPreview.created_at) ? savedPreview : undefined;
       const files = preview?.files ?? hits;
       return <details className={`mobile-folder-card${peerIndex > 0 && folderIndex === 0 ? " peer-break" : ""}`}
         key={key} onToggle={event => {
@@ -762,8 +764,9 @@ function FolderCandidateList({ peers, mobile, ...body }: FolderListProps): React
     }))}</div>;
   return <>{sorted.flatMap(([username, folders], peerIndex) => folders.map(([key, hits], folderIndex) => {
     const candidate = hits[0]!;
-    const preview = body.request.previews.find(item =>
+    const savedPreview = body.request.previews.find(item =>
       folderKey(body.request.id, item.username, item.directory, item.recursive) === key);
+    const preview = savedPreview && !isFolderPreviewExpired(savedPreview.created_at) ? savedPreview : undefined;
     const showInspect = body.canInspect && Boolean(candidate.directory) &&
       (!preview || !preview.files.some(body.matches));
     return <Collapsible className={`peer-group folder-result${peerIndex > 0 && folderIndex === 0 ? " peer-break" : ""}`}
@@ -777,7 +780,7 @@ function FolderCandidateList({ peers, mobile, ...body }: FolderListProps): React
             event.preventDefault();
             event.stopPropagation();
             inspect(candidate, key);
-          }}>{body.inspecting.has(key) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>}</summary>
+          }}>{body.inspecting.has(key) ? "Inspecting…" : savedPreview ? "Refresh" : "Inspect"}</button>}</summary>
       <div className="folder-candidate">
         <FolderCandidateBody {...body} candidate={candidate} hits={hits} folderId={key}
           onInspect={() => inspect(candidate, key)} showInspectAction={false} />
@@ -792,20 +795,21 @@ function FolderCandidateBody({ request, candidate, hits, folderId, canInspect, b
   candidate: Candidate; hits: Candidate[]; folderId: string; onInspect: () => void; showInspectAction: boolean;
 }): React.ReactElement {
   const requestConfirmation = useConfirmation();
-  const preview = request.previews.find(item =>
+  const savedPreview = request.previews.find(item =>
     folderKey(request.id, item.username, item.directory, item.recursive) === folderId);
+  const previewExpired = savedPreview ? isFolderPreviewExpired(savedPreview.created_at) : false;
+  const preview = previewExpired ? undefined : savedPreview;
   const queuedKeys = new Set(request.transfers.map(remoteFileKey));
   const visibleHits = hits.filter(matches);
   const visibleFiles = preview?.files.filter(matches) ?? [];
-  const previewExpired = preview && Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
-  const shownHits = !preview || !visibleFiles.length || previewExpired || previewErrors[folderId] ?
+  const shownHits = !preview || !visibleFiles.length ?
     visibleHits : searchHitsOutsidePreview(visibleHits, preview, selectedHits);
   const hitBytes = shownHits.reduce((total, file) => total + file.size, 0);
   return <>{showInspectAction && canInspect && candidate.directory && (!preview || !visibleFiles.length) &&
     <div className="candidate">
         <span><strong>{candidate.directory || "Shared files"}</strong><small title={candidate.explanation}>Match {Math.round(candidate.score * 100)}%</small></span>
         <button className="quiet" disabled={busy || inspecting.has(folderId)}
-          onClick={onInspect}>{inspecting.has(folderId) ? "Inspecting…" : preview ? "Refresh" : "Inspect"}</button>
+          onClick={onInspect}>{inspecting.has(folderId) ? "Inspecting…" : savedPreview ? "Refresh" : "Inspect"}</button>
       </div>}
       {preview && visibleFiles.length > 0 && <Preview key={preview.id} preview={preview}
         visibleFiles={visibleFiles} filterActive={filterKey !== "all:"} busy={busy} canQueue={canInspect}
@@ -848,9 +852,10 @@ function FolderCandidateBody({ request, candidate, hits, folderId, canInspect, b
             <span className="folder-file-size">{bytes(file.size)}</span></div>;
           })}
         </div>}
+      {previewExpired && <small role="status" className="warn">Folder inspection expired. Refresh to see all files.</small>}
       {previewErrors[folderId] && <small role="alert" className="warn">Inspection failed: {previewErrors[folderId]}.
         {shownHits.some(file => searchHitSelectionReason(request, file) === null) &&
-          " Search hits above remain selectable."} Select {preview ? "Refresh" : "Inspect"} to retry.</small>}
+          " Search hits above remain selectable."} Select {savedPreview ? "Refresh" : "Inspect"} to retry.</small>}
     </>;
 }
 
@@ -1004,7 +1009,7 @@ function Preview({ preview, visibleFiles, filterActive, busy, canQueue, queuedKe
   busy: boolean; canQueue: boolean; confirmPreview: (paths?: string[]) => void;
 }): React.ReactElement {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const expired = Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000;
+  const expired = isFolderPreviewExpired(preview.created_at);
   const canDownload = canQueue && !busy && !expired;
   const eligible = visibleFiles.filter(file => file.eligible);
   const availableVisible = eligible.filter(file => !queuedKeys.has(remoteFileKey(file)));

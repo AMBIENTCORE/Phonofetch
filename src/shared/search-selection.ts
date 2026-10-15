@@ -2,6 +2,13 @@ import type { Mode, RequestStatus, RequestType } from "./types";
 
 type SearchState = { type: RequestType; mode: Mode; status: RequestStatus };
 
+const folderPreviewTtlMs = 10 * 60 * 1000;
+
+export function isFolderPreviewExpired(createdAt: string, now = Date.now()): boolean {
+  const created = Date.parse(createdAt);
+  return !Number.isFinite(created) || now - created > folderPreviewTtlMs;
+}
+
 export function canAppendManualSearch(request: SearchState): boolean {
   return request.type === "search" && request.mode === "review" &&
     ["queueing", "active", "completed", "partial", "failed", "cancelled", "uncertain"].includes(request.status);

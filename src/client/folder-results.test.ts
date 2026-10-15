@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Candidate, FolderPreview, RequestStatus } from "../shared/types";
+import { isFolderPreviewExpired } from "../shared/search-selection";
 import { AUTO_FOLDER_PREVIEW_LIMIT, autoFolderPreviews, folderKey, searchHitSelectionReason, searchHitsOutsidePreview } from "./folder-results";
 
 const request = (status: RequestStatus = "review") => ({
@@ -12,6 +13,14 @@ const request = (status: RequestStatus = "review") => ({
 });
 
 describe("bounded folder inspection", () => {
+  it("treats previews as current through ten minutes, then expires them", () => {
+    const now = Date.parse("2026-10-15T12:49:23.000Z");
+    const createdAt = new Date(now - 10 * 60 * 1000).toISOString();
+    expect(isFolderPreviewExpired(createdAt, now)).toBe(false);
+    expect(isFolderPreviewExpired(createdAt, now + 1)).toBe(true);
+    expect(isFolderPreviewExpired("not-a-timestamp", now)).toBe(true);
+  });
+
   it("inspects at most five top-ranked distinct folders per batch", () => {
     const item = request();
     item.candidates.push({ ...item.candidates[0]!, id: "duplicate-search-hit" });

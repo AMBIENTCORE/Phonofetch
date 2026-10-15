@@ -5,7 +5,7 @@ import type { Config } from "./config";
 import { Store } from "./db";
 import { isSupportedAudioFile, manualSelectionCheck, mergeAudioMetadata, qualityCheck, rankFolder, withinDirectory } from "./matching";
 import type { SlskdPort } from "./port";
-import { canAppendManualSearch, canInspectFolder, canQueueSearchHits, remoteFileKey } from "../shared/search-selection";
+import { canAppendManualSearch, canInspectFolder, canQueueSearchHits, isFolderPreviewExpired, remoteFileKey } from "../shared/search-selection";
 
 export class Workflow {
   constructor(readonly store: Store, readonly port: SlskdPort, readonly config: Config) {}
@@ -73,7 +73,7 @@ export class Workflow {
     automatic = request.mode === "automatic"): Promise<string> {
     if (preview.request_id !== request.id || !["album_folder", "search"].includes(request.type))
       throw new ApiError(400, "Invalid folder preview");
-    if (Date.now() - Date.parse(preview.created_at) > 10 * 60 * 1000) throw new ApiError(409, "Folder preview expired; inspect again");
+    if (isFolderPreviewExpired(preview.created_at)) throw new ApiError(409, "Folder preview expired; inspect again");
     const eligible = preview.files.filter(file => automatic ?
       file.eligible && qualityCheck(file, request.quality).eligible : manualSelectionCheck(file).eligible);
     if (!eligible.length) throw new ApiError(422, "No selectable files in this folder");
